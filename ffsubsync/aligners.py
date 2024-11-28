@@ -22,11 +22,12 @@ class FailedToFindAlignmentException(Exception):
 
 
 class FFTAligner(TransformerMixin):
-    def __init__(self, max_offset_samples: Optional[int] = None) -> None:
+    def __init__(self, max_offset_samples: Optional[int] = None, window_size: int = 1000000) -> None:
         self.max_offset_samples: Optional[int] = max_offset_samples
         self.best_offset_: Optional[int] = None
         self.best_score_: Optional[float] = None
         self.get_score_: bool = False
+        self.window_size: int = window_size
 
     def _eliminate_extreme_offsets_from_solutions(
         self, convolve: np.ndarray, substring: np.ndarray
@@ -47,6 +48,35 @@ class FFTAligner(TransformerMixin):
         self.best_offset_ = len(convolve) - 1 - best_idx - len(substring)
         self.best_score_ = convolve[best_idx]
 
+    def _sliding_window_fft(self, refstring: np.ndarray, substring: np.ndarray) -> Tuple[float, int]:
+        best_score = float('-inf')
+        best_offset = 0
+        
+        for i in range(0, len(refstring), self.window_size // 2):
+            window = refstring[i:i + self.window_size]
+            if len(window) < len(substring):
+                break
+            
+            total_bits = math.log(len(substring) + len(window), 2)
+            total_length = int(2 ** math.ceil(total_bits))
+            extra_zeros = total_length - len(substring) - len(window)
+            
+            subft = np.fft.fft(np.append(np.zeros(extra_zeros + len(window)), substring))
+            refft = np.fft.fft(np.flip(np.append(window, np.zeros(len(substring) + extra_zeros)), 0))
+            
+            convolve = np.real(np.fft.ifft(subft * refft))
+            convolve = self._eliminate_extreme_offsets_from_solutions(convolve, substring)
+            
+            window_best_idx = int(np.argmax(convolve))
+            window_best_score = convolve[window_best_idx]
+            window_best_offset = len(convolve) - 1 - window_best_idx - len(substring) + i
+            
+            if window_best_score > best_score:
+                best_score = window_best_score
+                best_offset = window_best_offset
+        
+        return best_score, best_offset
+
     def fit(self, refstring, substring, get_score: bool = False) -> "FFTAligner":
         refstring, substring = [
             list(map(int, s)) if isinstance(s, str) else s
@@ -55,18 +85,23 @@ class FFTAligner(TransformerMixin):
         refstring, substring = map(
             lambda s: 2 * np.array(s).astype(float) - 1, [refstring, substring]
         )
-        total_bits = math.log(len(substring) + len(refstring), 2)
-        total_length = int(2 ** math.ceil(total_bits))
-        extra_zeros = total_length - len(substring) - len(refstring)
-        subft = np.fft.fft(np.append(np.zeros(extra_zeros + len(refstring)), substring))
-        refft = np.fft.fft(
-            np.flip(np.append(refstring, np.zeros(len(substring) + extra_zeros)), 0)
-        )
-        convolve = np.real(np.fft.ifft(subft * refft))
-        self._compute_argmax(
-            self._eliminate_extreme_offsets_from_solutions(convolve, substring),
-            substring,
-        )
+        
+        if len(refstring) + len(substring) > self.window_size:
+            self.best_score_, self.best_offset_ = self._sliding_window_fft(refstring, substring)
+        else:
+            total_bits = math.log(len(substring) + len(refstring), 2)
+            total_length = int(2 ** math.ceil(total_bits))
+            extra_zeros = total_length - len(substring) - len(refstring)
+            subft = np.fft.fft(np.append(np.zeros(extra_zeros + len(refstring)), substring))
+            refft = np.fft.fft(
+                np.flip(np.append(refstring, np.zeros(len(substring) + extra_zeros)), 0)
+            )
+            convolve = np.real(np.fft.ifft(subft * refft))
+            self._compute_argmax(
+                self._eliminate_extreme_offsets_from_solutions(convolve, substring),
+                substring,
+            )
+        
         self.get_score_ = get_score
         return self
 

@@ -271,7 +271,7 @@ class VideoSpeechTransformer(TransformerMixin):
                 "-v", "error", "-select_streams", "s", "-show_entries", "stream=index:stream_tags=language,title", 
                 "-of", "csv=p=0", fname
             ]
-            logger.info(f"Running ffprobe command: {' '.join(ffprobe_args)}")
+            logger.debug(f"Running ffprobe command: {' '.join(ffprobe_args)}")
             process = subprocess.Popen(ffprobe_args, **subprocess_args(include_stdout=True))
             output = process.communicate()[0].decode("utf-8").strip().splitlines()
             if process.returncode != 0 or not output:
@@ -291,7 +291,7 @@ class VideoSpeechTransformer(TransformerMixin):
                 )
                 subtitles_files.append(subtitle_filename)
                 ffmpeg_base_args.extend(["-map", f"0:{stream_index}", "-f", "srt", subtitle_filename])
-        logger.info(f"Running ffmpeg command: {' '.join(ffmpeg_base_args)}")
+        logger.debug(f"Running ffmpeg command: {' '.join(ffmpeg_base_args)}")
         process = subprocess.Popen(ffmpeg_base_args, **subprocess_args(include_stdout=True))
         process.communicate()
         if process.returncode != 0:

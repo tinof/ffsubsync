@@ -12,5 +12,5 @@ six
 srt>=3.0.0
 tqdm
 typing_extensions
-webrtcvad;platform_system!='Windows'
+webrtcvad
 scipy

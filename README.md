@@ -6,8 +6,6 @@ FFsubsync AE (Anchor Edition)
 
 **Next-gen subtitle synchronization** using hybrid AI/digital signal processing to handle both linear offsets and non-linear time warping.
 
-![Tiered Alignment Diagram](https://via.placeholder.com/800x400.png?text=Global+Offset+→+2-Point+Anchors+→+Auto+Midpoints)
-
 Key Features
 ------------
 - 🎯 **Tiered Alignment Strategy**  

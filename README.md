@@ -26,16 +26,12 @@ Key Features
 
 Install
 -------
-First, make sure ffmpeg is installed. On MacOS:
-~~~
-brew install ffmpeg
-~~~
-(Windows users: ensure `ffmpeg` is on your path)
+First, make sure ffmpeg is installed on your system.
 
 For the fastest installation experience:
 ~~~
 # Clone the repository
-git clone -b sliding-context https://github.com/tinof/ffsubsync.git
+git clone -b sffsubsync-ae https://github.com/tinof/ffsubsync.git
 cd ffsubsync
 
 # Install with pipx (recommended for CLI tools)
@@ -46,9 +42,9 @@ python -m pip install --user pipx
 pipx ensurepath
 ~~~
 
-Alternatively, you can install directly (slower as it needs to clone the repository):
+Alternatively, you can install directly:
 ~~~
-pipx install git+https://github.com/tinof/ffsubsync.git@sliding-context
+pipx install git+https://github.com/tinof/ffsubsync.git@ffsubsync-ae
 ~~~
 
 Usage

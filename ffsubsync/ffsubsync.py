@@ -713,6 +713,16 @@ def add_main_args_for_cli(parser: argparse.ArgumentParser) -> None:
         action='store_true',
         help='Overwrite the input subtitle file with synchronized output'
     )
+    parser.add_argument(
+        '--serialize-speech',
+        action='store_true',
+        help='Serialize speech data to JSON for debugging'
+    )
+    parser.add_argument(
+        '--make-test-case',
+        action='store_true',
+        help='Generate test case tarball for debugging'
+    )
 
 
 def make_parser() -> argparse.ArgumentParser:

@@ -708,6 +708,11 @@ def add_main_args_for_cli(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--vlc-mode", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--gui-mode", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--skip-sync", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        '--overwrite-input',
+        action='store_true',
+        help='Overwrite the input subtitle file with synchronized output'
+    )
 
 
 def make_parser() -> argparse.ArgumentParser:

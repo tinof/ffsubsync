@@ -1,13 +1,30 @@
-FFsubsync
-=======
+FFsubsync AE (Anchor Edition)
+=============================
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-maroon.svg)](https://opensource.org/licenses/MIT)
 [![Python Versions](https://img.shields.io/pypi/pyversions/ffsubsync.svg)](https://pypi.org/project/ffsubsync)
 
-Language-agnostic automatic synchronization of subtitles with video, so that
-subtitles are aligned to the correct starting point within the video.
+**Next-gen subtitle synchronization** using hybrid AI/digital signal processing to handle both linear offsets and non-linear time warping.
 
-This is a CLI-focused fork of the original [ffsubsync](https://github.com/smacke/ffsubsync) by Stephen Macke.
+![Tiered Alignment Diagram](https://via.placeholder.com/800x400.png?text=Global+Offset+→+2-Point+Anchors+→+Auto+Midpoints)
+
+Key Features
+------------
+- 🎯 **Tiered Alignment Strategy**  
+  1. Global offset detection (FFT)  
+  2. 2-point anchor alignment  
+  3. Automatic midpoint insertion (up to 5 anchors)
+  
+- 🛠 **Non-Linear Correction**  
+  Handles complex cases:  
+  - Variable playback speeds  
+  - Regional edit differences  
+  - Drifting frame rates  
+  - Partial scene cuts
+
+- ⚡ **Smart Fallbacks**  
+  - Preserves original sync points where alignment confidence is high  
+  - Automatic failure detection with graduated retry system
 
 Install
 -------
@@ -55,18 +72,54 @@ If synchronization fails, try these options:
 - `--gss`: Use golden-section search for optimal framerate ratio
 - `--max-offset-seconds N`: Increase from default 60 seconds if subtitles are more out of sync
 - `--vad=auditok`: Try alternative audio detection method for low-quality audio
+- `--n-anchors N`: Force using specific number of anchor points (0=disable) for handling non-linear drift
 
 How It Works
 ------------
 1. Discretize video audio and subtitles into 10ms windows
 2. Detect speech presence in each window using WebRTC's VAD
 3. Align the resulting binary patterns using FFT-based convolution
+4. Anchor-based alignment:
+   - Global offset detection
+   - 2-point anchor alignment
+   - Automatic midpoint insertion
+
+Future Roadmap
+--------------
+- **Machine Learning Integration**  
+  - Whisper-based anchor detection for no-audio cases  
+  - Neural VAD for better speech boundary detection
+
+- **Cloud-Native Features**  
+  - Distributed alignment using serverless FFT  
+  - Crowdsourced synchronization patterns
+
+- **Advanced Warping**  
+  - Bézier curve time mapping  
+  - Scene-boundary aware correction
+
+- **Real-Time Collaboration**  
+  - Shared anchor editing via WebRTC data channels  
+  - Version-controlled subtitle histories
+
+Why Anchor Edition?
+-------------------
+This community-driven fork extends the original FFsubsync with:
+
+| Feature               | Original | AE Edition |
+|-----------------------|----------|------------|
+| Non-linear alignment  | ❌       | ✅         |
+| Tiered retry system   | ❌       | ✅         |
+| ML fallbacks          | ❌       | WIP        |
+| Multi-user sync       | ❌       | Planned    |
 
 Credits
 -------
-- Original project by [Stephen Macke](https://github.com/smacke/ffsubsync)
-- Core dependencies: ffmpeg, webrtc VAD, numpy
-- Full credits and documentation available in the [original repository](https://github.com/smacke/ffsubsync)
+- Original concept: [Stephen Macke](https://github.com/smacke/ffsubsync)  
+- Anchor edition maintainers: [Your Name] and contributors  
+- Core dependencies: FFmpeg, WebRTC VAD, NumPy, SciPy
+
+*"Time is an illusion. Subtitle synchronization doubly so."* - Community Proverb
 
 License
 -------

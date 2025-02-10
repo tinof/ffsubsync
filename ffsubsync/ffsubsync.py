@@ -269,19 +269,22 @@ def try_sync(
             logger.info("offset seconds: %.3f", offset_samples / float(SAMPLE_RATE))
             
             if srtout:
-                output_steps = []
-                if offset_samples != 0:
-                    offset_seconds = offset_samples / float(SAMPLE_RATE)
-                    logger.info("offset seconds: %.3f", offset_seconds)
-                    output_steps.append(("shift", SubtitleShifter(offset_seconds)))
-                    
+                # Get the parser from the best performing pipeline
+                parser = cast(Pipeline, srt_pipe_maker(1.0)).named_steps['parse']
+                
+                # Create pipeline with parser first
+                out_pipe = Pipeline([
+                    ('parse', parser),
+                    ('shift', SubtitleShifter(offset_samples / float(SAMPLE_RATE))),
+                ])
+                
+                # Add merge step if needed
                 if args.merge_with_reference:
-                    output_steps.append(
-                        ("merge", SubtitleMerger(reference_pipe.named_steps["parse"].subs_))
+                    out_pipe.steps.append(
+                        ('merge', SubtitleMerger(reference_pipe.named_steps['parse'].subs_))
                     )
-                    
-                # Apply the pipeline steps
-                out_pipe = Pipeline(output_steps) if output_steps else best_srt_pipe
+                
+                # Transform the subtitles
                 out_subs = out_pipe.fit_transform(srtin)
                 
                 if args.output_encoding != "same":

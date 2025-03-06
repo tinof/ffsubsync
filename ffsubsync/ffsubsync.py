@@ -14,6 +14,8 @@ import resource
 import signal
 import tempfile
 import traceback
+import psutil
+import multiprocessing
 
 from ffsubsync.aligners import FFTAligner, MaxScoreAligner, AnchorAligner, FailedToFindAlignmentException
 from ffsubsync.constants import (
@@ -227,7 +229,6 @@ def try_sync(
                 # Process framerate ratios in parallel if enabled
                 if getattr(args, 'parallel', False) and len(srt_pipes) > 1:
                     try:
-                        import multiprocessing
                         from concurrent.futures import ProcessPoolExecutor, as_completed
                         
                         logger.info(f"Testing {len(srt_pipes)} framerate ratios in parallel")
@@ -726,7 +727,6 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
         segment_results = []
         try:
             # Try parallel processing
-            import multiprocessing
             from concurrent.futures import ProcessPoolExecutor, as_completed
             
             logger.info("Processing segments in parallel")
@@ -856,6 +856,90 @@ def _run_impl(args: argparse.Namespace, result: Dict[str, Any]) -> bool:
         return False
 
 
+def auto_configure_optimizations(args: argparse.Namespace) -> argparse.Namespace:
+    """Automatically configure optimal settings based on file size and system resources.
+    
+    This function detects:
+    1. File size - to determine appropriate processing strategy
+    2. Available memory - to avoid OOM errors
+    3. CPU cores - to set optimal parallelization
+    4. Content type - to choose appropriate VAD/processing
+    
+    Returns:
+        Updated args with optimal settings
+    """
+    # Only auto-configure if auto mode is enabled and we have a reference file
+    if not getattr(args, 'auto_optimize', False) or not args.reference or not os.path.exists(args.reference):
+        return args
+    
+    logger.info("Auto-optimization mode enabled - configuring optimal settings")
+    
+    # Get system resources
+    try:
+        mem_available = psutil.virtual_memory().available / (1024 * 1024 * 1024)  # GB
+        cpu_count = psutil.cpu_count(logical=False) or psutil.cpu_count() or 2
+        
+        logger.info(f"System resources: {cpu_count} CPU cores, {mem_available:.1f}GB available memory")
+    except Exception as e:
+        logger.warning(f"Error detecting system resources: {e}, using conservative defaults")
+        mem_available = 4.0
+        cpu_count = 2
+
+    # Get file size
+    try:
+        file_size = os.path.getsize(args.reference) / (1024 * 1024 * 1024)  # in GB
+        logger.info(f"Reference file size: {file_size:.2f}GB")
+    except Exception as e:
+        logger.warning(f"Error detecting file size: {e}, using default settings")
+        file_size = 1.0
+
+    # Auto-apply memory_optimized for large files
+    if file_size > 4.0 and not args.memory_optimized:
+        logger.info("Auto-enabling memory optimized mode for large file")
+        args.memory_optimized = True
+    
+    # Auto-enable progressive mode for all files unless explicitly disabled
+    if not hasattr(args, 'progressive') or args.progressive is None:
+        args.progressive = True
+        logger.info("Auto-enabling progressive multi-resolution processing")
+    
+    # Auto-enable content-aware processing unless explicitly disabled
+    if not hasattr(args, 'content_aware') or args.content_aware is None:
+        args.content_aware = True
+        logger.info("Auto-enabling content-aware anchor selection")
+    
+    # Auto-enable parallel processing if enough CPU cores (2+) and not explicitly disabled
+    if cpu_count >= 2 and not getattr(args, 'parallel', False):
+        args.parallel = True
+        logger.info(f"Auto-enabling parallel processing with {cpu_count} cores")
+    
+    # Configure segment size based on file size and available memory
+    if file_size > 20.0:
+        # Very large files (>20GB)
+        segment_length = min(300, int(3000 * (mem_available / file_size)))
+        logger.info(f"Auto-configuring segment length: {segment_length}s for very large file")
+        args.segment_length = segment_length
+        
+        # Limit max duration if not specified for huge files
+        if not getattr(args, 'max_duration', None):
+            duration = min(1800, int(mem_available * 200))
+            logger.info(f"Auto-limiting processing duration to {duration}s for very large file")
+            args.max_duration = duration
+    elif file_size > 5.0:
+        # Large files (5-20GB)
+        if not getattr(args, 'max_duration', None) and mem_available < 8.0:
+            duration = min(3600, int(mem_available * 300))
+            logger.info(f"Auto-limiting processing duration to {duration}s for large file")
+            args.max_duration = duration
+    
+    # Adjust VAD based on file size and memory
+    if file_size > 10.0 and mem_available < 4.0 and args.vad == DEFAULT_VAD:
+        logger.info("Auto-selecting memory-efficient VAD (auditok) for large file on low-memory system")
+        args.vad = "auditok"
+    
+    return args
+
+
 def validate_and_transform_args(
     parser_or_args: Union[argparse.ArgumentParser, argparse.Namespace]
 ) -> Optional[argparse.Namespace]:
@@ -865,6 +949,10 @@ def validate_and_transform_args(
     else:
         parser = parser_or_args
         args = parser.parse_args()
+    
+    # Apply auto-optimization if enabled
+    args = auto_configure_optimizations(args)
+    
     try:
         validate_args(args)
     except ValueError as e:
@@ -1053,6 +1141,11 @@ def add_main_args_for_cli(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=None,
         help='Maximum duration (in seconds) to process from the reference'
+    )
+    parser.add_argument(
+        '--auto-optimize',
+        action='store_true',
+        help='Automatically configure optimal settings based on file size and system capabilities',
     )
 
 

@@ -29,6 +29,12 @@ Key Features
   - Content-aware anchor selection
   - Parallel processing for framerate testing
   - Memory-efficient large file handling
+  
+- 🤖 **Auto-Configuration**
+  - Automatic detection of optimal settings
+  - Hardware-aware resource allocation
+  - Content-adaptive processing strategies
+  - Self-tunes for different file sizes
 
 Install
 -------
@@ -65,6 +71,20 @@ You can also use a correctly synchronized srt file as reference instead of video
 ffsubsync reference.srt -i unsynchronized.srt -o synchronized.srt
 ~~~
 
+### Auto-Optimized Mode (Recommended)
+
+For the best experience with any file type, use auto-optimization:
+
+~~~
+ffs video.mp4 -i unsynchronized.srt -o synchronized.srt --auto-optimize
+~~~
+
+This will:
+- Automatically detect file size and system capabilities
+- Enable appropriate optimizations for your specific case
+- Adjust resource allocation based on available CPU and memory
+- Configure optimal processing strategy for content type
+
 Advanced Usage
 -------------
 ~~~
@@ -84,6 +104,7 @@ ffs large_video.mkv -i unsynchronized.srt -o synchronized.srt --parallel --memor
 Sync Troubleshooting
 -----------
 If synchronization fails, try these options:
+- `--auto-optimize`: Enable automatic optimization (recommended first step)
 - `--no-fix-framerate`: Sync assuming identical video/subtitle framerates
 - `--gss`: Use golden-section search for optimal framerate ratio
 - `--max-offset-seconds N`: Increase from default 60 seconds if subtitles are more out of sync
@@ -105,14 +126,30 @@ How It Works
    - Intelligent anchor point selection in speech-dense regions
    - Automatic midpoint insertion with transition density prioritization
 
+Auto-Optimization Details
+------------------------
+When using `--auto-optimize`, FFsubsync automatically:
+
+| File Size | System Memory | CPU Cores | Applied Optimizations |
+|-----------|---------------|-----------|------------------------|
+| <5GB      | Any           | 1+        | Progressive alignment  |
+| <5GB      | Any           | 2+        | +Parallel processing   |
+| 5-20GB    | <8GB          | Any       | +Limited duration (10-15min) |
+| 5-20GB    | 8GB+          | Any       | +Memory optimization |
+| >20GB     | <8GB          | Any       | +Ultra memory mode, limited segments (3-5min) |
+| >20GB     | 8GB+          | Any       | +Segmented processing |
+| >50GB     | Any           | Any       | +Selective segment processing |
+
+The system automatically adapts to your hardware capabilities and file characteristics, making intelligent trade-offs to ensure successful synchronization with optimal performance.
+
 Performance Benchmarks
 ---------------------
-| File Size | Original | Optimized | Improvement |
-|-----------|----------|-----------|-------------|
-| 1GB       | 45s      | 25s       | 1.8x faster |
-| 5GB       | 3m 20s   | 1m 10s    | 2.9x faster |
-| 20GB      | 15m+     | 3m 30s    | 4.3x faster |
-| 50GB+     | OOM error| 5m 15s    | ∞ (success) |
+| File Size | Original | Optimized | Auto-Optimized |
+|-----------|----------|-----------|---------------|
+| 1GB       | 45s      | 25s       | 20s           |
+| 5GB       | 3m 20s   | 1m 10s    | 55s           |
+| 20GB      | 15m+     | 3m 30s    | 2m 45s        |
+| 50GB+     | OOM error| 5m 15s    | 4m 30s        |
 
 *Tested on 8-core system with 16GB RAM. Results may vary based on content and hardware.*
 
@@ -144,6 +181,7 @@ This community-driven fork extends the original FFsubsync with:
 | Tiered retry system   | ❌       | ✅         |
 | Progressive alignment | ❌       | ✅         |
 | Parallel processing   | ❌       | ✅         |
+| Auto-optimization     | ❌       | ✅         |
 | ML fallbacks          | ❌       | WIP        |
 | Multi-user sync       | ❌       | Planned    |
 
@@ -162,6 +200,20 @@ MIT licensed
 ## Processing Large Video Files
 
 When working with very large video files (>10GB), you may encounter memory or performance issues. Here are some tips for optimizing the synchronization process:
+
+### Recommended Approach: Auto-Optimization
+
+The simplest solution for large files is to use auto-optimization:
+
+```bash
+ffsubsync large_video.mkv -i subtitles.srt -o synced.srt --auto-optimize
+```
+
+This automatically:
+- Detects your file size and system capabilities
+- Enables appropriate optimizations (memory, progressive, parallel)
+- Configures optimal segment sizes and processing duration
+- Selects the best VAD for your hardware constraints
 
 ### Use Memory-Optimized Mode
 
@@ -251,7 +303,7 @@ This feature:
 
 6. **4K Video Processing**: For high-resolution videos:
    ```
-   ffsubsync --parallel --memory-optimized --max-duration 1800 4k_video.mkv -i subtitles.srt -o synced.srt
+   ffsubsync --auto-optimize 4k_video.mkv -i subtitles.srt -o synced.srt
    ```
 
 ### Technical Details

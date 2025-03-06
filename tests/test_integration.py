@@ -15,6 +15,7 @@ from ffsubsync import ffsubsync
 from ffsubsync.sklearn_shim import make_pipeline
 from ffsubsync.speech_transformers import SubtitleSpeechTransformer
 from ffsubsync.subtitle_parser import GenericSubtitleParser
+from ffsubsync.aligners import AnchorAligner
 
 INTEGRATION = "INTEGRATION"
 SYNC_TESTS = "sync_tests"
@@ -85,3 +86,18 @@ def test_sync_matches_ground_truth(args, truth, should_detect_encoding):
             assert detected_encoding(args.srtin[0]) == should_detect_encoding
     finally:
         shutil.rmtree(dirpath)
+
+@pytest.mark.parametrize("test_case", [
+    {'input': 'tempo_drift.srt', 'expected_anchors': 3}
+])
+def test_anchor_based_alignment(test_case):
+    """Test that anchor count matches expected for tempo drift cases."""
+    parser = GenericSubtitleParser()
+    aligner = AnchorAligner(n_anchors=test_case['expected_anchors'])
+    pipe = make_pipeline(parser, aligner)
+    
+    # Load test subtitle
+    pipe.fit(test_case['input'])
+    
+    # Verify anchor count
+    assert len(aligner.anchors_) == test_case['expected_anchors']

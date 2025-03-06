@@ -39,3 +39,9 @@ API_RELEASE_URL: str = "https://api.github.com/repos/{}/{}/releases/latest".form
 RELEASE_URL: str = "https://github.com/{}/{}/releases/latest/".format(
     GITHUB_DEV_USER, GITHUB_REPO
 )
+
+# Alignment thresholds and parameters
+DEFAULT_SUCCESS_THRESHOLD = 0.85  # 85% match
+MIN_ACCEPTABLE_SCORE = 0.7
+MAX_AUTO_ANCHORS = 5
+MIN_ANCHOR_GAP_SECONDS = 30.0  # Minimum gap between anchors in seconds

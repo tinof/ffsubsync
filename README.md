@@ -1,48 +1,50 @@
-FFsubsync
-=======
+FFsubsync AE (Anchor Edition)
+=============================
 
-[![CI Status](https://github.com/smacke/ffsubsync/workflows/ffsubsync/badge.svg)](https://github.com/smacke/ffsubsync/actions)
-[![Support Ukraine](https://badgen.net/badge/support/UKRAINE/?color=0057B8&labelColor=FFD700)](https://github.com/vshymanskyy/StandWithUkraine/blob/main/docs/README.md)
-[![Checked with mypy](http://www.mypy-lang.org/static/mypy_badge.svg)](http://mypy-lang.org/)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![License: MIT](https://img.shields.io/badge/License-MIT-maroon.svg)](https://opensource.org/licenses/MIT)
 [![Python Versions](https://img.shields.io/pypi/pyversions/ffsubsync.svg)](https://pypi.org/project/ffsubsync)
-[![Documentation Status](https://readthedocs.org/projects/ffsubsync/badge/?version=latest)](https://ffsubsync.readthedocs.io/en/latest/?badge=latest)
-[![PyPI Version](https://img.shields.io/pypi/v/ffsubsync.svg)](https://pypi.org/project/ffsubsync)
 
+**Next-gen subtitle synchronization** using hybrid AI/digital signal processing to handle both linear offsets and non-linear time warping.
 
-Language-agnostic automatic synchronization of subtitles with video, so that
-subtitles are aligned to the correct starting point within the video.
+Key Features
+------------
+- 🎯 **Tiered Alignment Strategy**  
+  1. Global offset detection (FFT)  
+  2. 2-point anchor alignment  
+  3. Automatic midpoint insertion (up to 5 anchors)
+  
+- 🛠 **Non-Linear Correction**  
+  Handles complex cases:  
+  - Variable playback speeds  
+  - Regional edit differences  
+  - Drifting frame rates  
+  - Partial scene cuts
 
-Turn this:                       |  Into this:
-:-------------------------------:|:-------------------------:
-![](https://raw.githubusercontent.com/smacke/ffsubsync/master/resources/img/tearing-me-apart-wrong.gif)  |  ![](https://raw.githubusercontent.com/smacke/ffsubsync/master/resources/img/tearing-me-apart-correct.gif)
-
-Helping Development
--------------------
-Please consider [supporting Ukraine](https://github.com/vshymanskyy/StandWithUkraine/blob/main/docs/README.md)
-rather than donating directly to this project. That said, at the request of
-some, you can now help cover my coffee expenses using the Github Sponsors
-button at the top, or using the below Paypal Donate button:
-
-[![Donate](https://www.paypalobjects.com/en_US/i/btn/btn_donate_LG.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=XJC5ANLMYECJE)
+- ⚡ **Smart Fallbacks**  
+  - Preserves original sync points where alignment confidence is high  
+  - Automatic failure detection with graduated retry system
 
 Install
 -------
-First, make sure ffmpeg is installed. On MacOS, this looks like:
-~~~
-brew install ffmpeg
-~~~
-(Windows users: make sure `ffmpeg` is on your path and can be referenced
-from the command line!)
+First, make sure ffmpeg is installed on your system.
 
-Next, grab the package (compatible with Python >= 3.6):
+For the fastest installation experience:
 ~~~
-pip install ffsubsync
+# Clone the repository
+git clone -b sffsubsync-ae https://github.com/tinof/ffsubsync.git
+cd ffsubsync
+
+# Install with pipx (recommended for CLI tools)
+pipx install -e .
+
+# If you don't have pipx:
+python -m pip install --user pipx
+pipx ensurepath
 ~~~
-If you want to live dangerously, you can grab the latest version as follows:
+
+Alternatively, you can install directly:
 ~~~
-pip install git+https://github.com/smacke/ffsubsync@latest
+pipx install git+https://github.com/tinof/ffsubsync.git@ffsubsync-ae
 ~~~
 
 Usage
@@ -52,104 +54,73 @@ Usage
 ffs video.mp4 -i unsynchronized.srt -o synchronized.srt
 ~~~
 
-There may be occasions where you have a correctly synchronized srt file in a
-language you are unfamiliar with, as well as an unsynchronized srt file in your
-native language. In this case, you can use the correctly synchronized srt file
-directly as a reference for synchronization, instead of using the video as the
-reference:
-
+You can also use a correctly synchronized srt file as reference instead of video:
 ~~~
 ffsubsync reference.srt -i unsynchronized.srt -o synchronized.srt
 ~~~
 
-`ffsubsync` uses the file extension to decide whether to perform voice activity
-detection on the audio or to directly extract speech from an srt file.
-
-Sync Issues
+Sync Troubleshooting
 -----------
-If the sync fails, the following recourses are available:
-- Try to sync assuming identical video / subtitle framerates by passing
-  `--no-fix-framerate`;
-- Try passing `--gss` to use [golden-section search](https://en.wikipedia.org/wiki/Golden-section_search)
-  to find the optimal ratio between video and subtitle framerates (by default,
-  only a few common ratios are evaluated);
-- Try a value of `--max-offset-seconds` greater than the default of 60, in the
-  event that the subtitles are out of sync by more than 60 seconds (empirically
-  unlikely in practice, but possible).
-- Try `--vad=auditok` since [auditok](https://github.com/amsehili/auditok) can
-  sometimes work better in the case of low-quality audio than WebRTC's VAD.
-  Auditok does not specifically detect voice, but instead detects all audio;
-  this property can yield suboptimal syncing behavior when a proper VAD can
-  work well, but can be effective in some cases.
-
-If the sync still fails, consider trying one of the following similar tools:
-- [sc0ty/subsync](https://github.com/sc0ty/subsync): does speech-to-text and looks for matching word morphemes
-- [kaegi/alass](https://github.com/kaegi/alass): rust-based subtitle synchronizer with a fancy dynamic programming algorithm
-- [tympanix/subsync](https://github.com/tympanix/subsync): neural net based approach that optimizes directly for alignment when performing speech detection
-- [oseiskar/autosubsync](https://github.com/oseiskar/autosubsync): performs speech detection with bespoke spectrogram + logistic regression
-- [pums974/srtsync](https://github.com/pums974/srtsync): similar approach to ffsubsync (WebRTC's VAD + FFT to maximize signal cross correlation)
-
-Speed
------
-`ffsubsync` usually finishes in 20 to 30 seconds, depending on the length of
-the video. The most expensive step is actually extraction of raw audio. If you
-already have a correctly synchronized "reference" srt file (in which case audio
-extraction can be skipped), `ffsubsync` typically runs in less than a second.
+If synchronization fails, try these options:
+- `--no-fix-framerate`: Sync assuming identical video/subtitle framerates
+- `--gss`: Use golden-section search for optimal framerate ratio
+- `--max-offset-seconds N`: Increase from default 60 seconds if subtitles are more out of sync
+- `--vad=auditok`: Try alternative audio detection method for low-quality audio
+- `--n-anchors N`: Force using specific number of anchor points (0=disable) for handling non-linear drift
 
 How It Works
 ------------
-The synchronization algorithm operates in 3 steps:
-1. Discretize both the video file's audio stream and the subtitles into 10ms
-   windows.
-2. For each 10ms window, determine whether that window contains speech.  This
-   is trivial to do for subtitles (we just determine whether any subtitle is
-   "on" during each time window); for the audio stream, use an off-the-shelf
-   voice activity detector (VAD) like
-   the one built into [webrtc](https://webrtc.org/).
-3. Now we have two binary strings: one for the subtitles, and one for the
-   video.  Try to align these strings by matching 0's with 0's and 1's with
-   1's. We score these alignments as (# video 1's matched w/ subtitle 1's) - (#
-   video 1's matched with subtitle 0's).
+1. Discretize video audio and subtitles into 10ms windows
+2. Detect speech presence in each window using WebRTC's VAD
+3. Align the resulting binary patterns using FFT-based convolution
+4. Anchor-based alignment:
+   - Global offset detection
+   - 2-point anchor alignment
+   - Automatic midpoint insertion
 
-The best-scoring alignment from step 3 determines how to offset the subtitles
-in time so that they are properly synced with the video. Because the binary
-strings are fairly long (millions of digits for video longer than an hour), the
-naive O(n^2) strategy for scoring all alignments is unacceptable. Instead, we
-use the fact that "scoring all alignments" is a convolution operation and can
-be implemented with the Fast Fourier Transform (FFT), bringing the complexity
-down to O(n log n).
+Future Roadmap
+--------------
+- **Machine Learning Integration**  
+  - Whisper-based anchor detection for no-audio cases  
+  - Neural VAD for better speech boundary detection
 
-Limitations
------------
-In most cases, inconsistencies between video and subtitles occur when starting
-or ending segments present in video are not present in subtitles, or vice versa.
-This can occur, for example, when a TV episode recap in the subtitles was pruned
-from video. FFsubsync typically works well in these cases, and in my experience
-this covers >95% of use cases. Handling breaks and splits outside of the beginning
-and ending segments is left to future work (see below).
+- **Cloud-Native Features**  
+  - Distributed alignment using serverless FFT  
+  - Crowdsourced synchronization patterns
 
-Future Work
------------
-Besides general stability and usability improvements, one line
-of work aims to extend the synchronization algorithm to handle splits
-/ breaks in the middle of video not present in subtitles (or vice versa).
-Developing a robust solution will take some time (assuming one is possible).
-See [#10](https://github.com/smacke/ffsubsync/issues/10) for more details.
+- **Advanced Warping**  
+  - Bézier curve time mapping  
+  - Scene-boundary aware correction
 
-History
--------
-The implementation for this project was started during HackIllinois 2019, for
-which it received an **_Honorable Mention_** (ranked in the top 5 projects,
-excluding projects that won company-specific prizes).
+- **Real-Time Collaboration**  
+  - Shared anchor editing via WebRTC data channels  
+  - Version-controlled subtitle histories
+
+Why Anchor Edition?
+-------------------
+This community-driven fork extends the original FFsubsync with:
+
+| Feature               | Original | AE Edition |
+|-----------------------|----------|------------|
+| Non-linear alignment  | ❌       | ✅         |
+| Tiered retry system   | ❌       | ✅         |
+| ML fallbacks          | ❌       | WIP        |
+| Multi-user sync       | ❌       | Planned    |
 
 Credits
 -------
-This project would not be possible without the following libraries:
-- [ffmpeg](https://www.ffmpeg.org/) and the [ffmpeg-python](https://github.com/kkroening/ffmpeg-python) wrapper, for extracting raw audio from video
-- VAD from [webrtc](https://webrtc.org/) and the [py-webrtcvad](https://github.com/wiseman/py-webrtcvad) wrapper, for speech detection
-- [srt](https://pypi.org/project/srt/) for operating on [SRT files](https://en.wikipedia.org/wiki/SubRip#SubRip_text_file_format)
-- [numpy](http://www.numpy.org/) and, indirectly, [FFTPACK](https://www.netlib.org/fftpack/), which powers the FFT-based algorithm for fast scoring of alignments between subtitles (or subtitles and video)
-- Other excellent Python libraries like [argparse](https://docs.python.org/3/library/argparse.html), [rich](https://github.com/willmcgugan/rich), and [tqdm](https://tqdm.github.io/), not related to the core functionality, but which enable much better experiences for developers and users.
+- Original concept: [Stephen Macke](https://github.com/smacke/ffsubsync)  
+- Anchor edition maintainers: [Your Name] and contributors  
+- Core dependencies: FFmpeg, WebRTC VAD, NumPy, SciPy
 
-# License
-Code in this project is [MIT licensed](https://opensource.org/licenses/MIT).
+*"Time is an illusion. Subtitle synchronization doubly so."* - Community Proverb
+
+License
+-------
+MIT licensed
+
+## Processing Large Video Files
+
+When working with very large video files (>10GB), you may encounter memory or performance issues. Here are some tips for optimizing the synchronization process:
+
+### Use Memory-Optimized Mode

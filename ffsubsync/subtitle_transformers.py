@@ -2,6 +2,9 @@
 from datetime import timedelta
 import logging
 import numbers
+from typing import List, Tuple
+import numpy as np
+from scipy.interpolate import interp1d
 
 from ffsubsync.generic_subtitles import GenericSubtitle, GenericSubtitlesFile, SubsMixin
 from ffsubsync.sklearn_shim import TransformerMixin
@@ -123,3 +126,58 @@ class SubtitleMerger(SubsMixin, TransformerMixin):
 
     def transform(self, *_):
         return self.subs_
+
+
+class SubtitleMorpher(SubsMixin, TransformerMixin):
+    """Transform subtitles using piecewise linear time warping between anchor points."""
+    
+    def __init__(self, anchors: List[Tuple[float, float]]):
+        """Initialize SubtitleMorpher.
+        
+        Args:
+            anchors: List of (reference_time, subtitle_time) pairs defining the warping
+        """
+        super(SubsMixin, self).__init__()
+        self.anchors = sorted(anchors, key=lambda x: x[0])
+        self.time_map_ = None
+        
+    def fit(self, subs: GenericSubtitlesFile, *_):
+        """Create piecewise linear mapping function from anchor points."""
+        # Extract source and target times from anchors
+        source_times = np.array([a[1] for a in self.anchors])
+        target_times = np.array([a[0] for a in self.anchors])
+        
+        # Create interpolation function
+        self.time_map_ = interp1d(
+            source_times,
+            target_times,
+            kind='linear',
+            bounds_error=False,
+            fill_value='extrapolate'
+        )
+        
+        # Store subtitles for transform
+        self.subs_ = subs
+        return self
+        
+    def transform(self, *_) -> GenericSubtitlesFile:
+        """Apply time warping to subtitles."""
+        if self.time_map_ is None:
+            raise ValueError("Must call fit before transform")
+            
+        warped_subs = []
+        for sub in self.subs_:
+            # Apply time warping to start and end times with clamping
+            new_start = max(0, float(self.time_map_(sub.start.total_seconds())))
+            new_end = max(0, float(self.time_map_(sub.end.total_seconds())))
+            
+            # Create new subtitle with warped times
+            warped_subs.append(
+                GenericSubtitle(
+                    timedelta(seconds=new_start),
+                    timedelta(seconds=new_end),
+                    sub.inner
+                )
+            )
+            
+        return self.subs_.clone_props_for_subs(warped_subs)

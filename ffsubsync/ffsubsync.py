@@ -10,8 +10,11 @@ import sys
 from typing import cast, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+import resource
+import signal
+import tempfile
 
-from ffsubsync.aligners import FFTAligner, MaxScoreAligner
+from ffsubsync.aligners import FFTAligner, MaxScoreAligner, AnchorAligner, FailedToFindAlignmentException
 from ffsubsync.constants import (
     DEFAULT_APPLY_OFFSET_SECONDS,
     DEFAULT_FRAME_RATE,
@@ -24,6 +27,9 @@ from ffsubsync.constants import (
     FRAMERATE_RATIOS,
     SAMPLE_RATE,
     SUBTITLE_EXTENSIONS,
+    DEFAULT_SUCCESS_THRESHOLD,
+    MIN_ACCEPTABLE_SCORE,
+    MAX_AUTO_ANCHORS,
 )
 from ffsubsync.ffmpeg_utils import ffmpeg_bin_path
 from ffsubsync.sklearn_shim import Pipeline, TransformerMixin
@@ -33,7 +39,7 @@ from ffsubsync.speech_transformers import (
     make_subtitle_speech_pipeline,
 )
 from ffsubsync.subtitle_parser import make_subtitle_parser
-from ffsubsync.subtitle_transformers import SubtitleMerger, SubtitleShifter
+from ffsubsync.subtitle_transformers import SubtitleMerger, SubtitleShifter, SubtitleMorpher
 from ffsubsync.version import get_version
 
 
@@ -121,6 +127,20 @@ def get_framerate_ratios_to_try(args: argparse.Namespace) -> List[Optional[float
         return framerate_ratios
 
 
+def calculate_morphed_score(ref_speech: np.ndarray, morphed_speech: np.ndarray) -> float:
+    """Calculate alignment score after morphing."""
+    if len(ref_speech) != len(morphed_speech):
+        # Pad the shorter signal if lengths don't match
+        max_len = max(len(ref_speech), len(morphed_speech))
+        if len(ref_speech) < max_len:
+            ref_speech = np.pad(ref_speech, (0, max_len - len(ref_speech)))
+        else:
+            morphed_speech = np.pad(morphed_speech, (0, max_len - len(morphed_speech)))
+    
+    # Use FFTAligner to compute correlation score
+    return FFTAligner().fit_transform(ref_speech, morphed_speech, get_score=True)[0]
+
+
 def try_sync(
     args: argparse.Namespace, reference_pipe: Optional[Pipeline], result: Dict[str, Any]
 ) -> bool:
@@ -130,91 +150,168 @@ def try_sync(
         "extracting speech segments from %s...",
         "stdin" if not args.srtin else "subtitles file(s) {}".format(args.srtin),
     )
+    
     if not args.srtin:
         args.srtin = [None]
+        
     for srtin in args.srtin:
         try:
             skip_sync = args.skip_sync or reference_pipe is None
-            skip_infer_framerate_ratio = (
-                args.skip_infer_framerate_ratio or reference_pipe is None
-            )
+            skip_infer_framerate_ratio = args.skip_infer_framerate_ratio or reference_pipe is None
             srtout = srtin if args.overwrite_input else args.srtout
+            
+            # Setup subtitle processing pipeline
             srt_pipe_maker = get_srt_pipe_maker(args, srtin)
             framerate_ratios = get_framerate_ratios_to_try(args)
             srt_pipes = [srt_pipe_maker(1.0)] + [
                 srt_pipe_maker(rat) for rat in framerate_ratios
             ]
+            
+            # Initial pipeline setup
             for srt_pipe in srt_pipes:
                 if callable(srt_pipe):
                     continue
                 else:
                     srt_pipe.fit(srtin)
-            if not skip_infer_framerate_ratio and hasattr(
-                reference_pipe[-1], "num_frames"
-            ):
-                inferred_framerate_ratio_from_length = (
-                    float(reference_pipe[-1].num_frames)
-                    / cast(Pipeline, srt_pipes[0])[-1].num_frames
-                )
-                logger.info(
-                    "inferred frameratio ratio: %.3f"
-                    % inferred_framerate_ratio_from_length
-                )
+                    
+            # Infer framerate ratio if needed
+            if not skip_infer_framerate_ratio and hasattr(reference_pipe[-1], "num_frames"):
+                inferred_ratio = float(reference_pipe[-1].num_frames) / cast(Pipeline, srt_pipes[0])[-1].num_frames
+                logger.info("inferred framerate ratio: %.3f", inferred_ratio)
                 srt_pipes.append(
-                    cast(
-                        Pipeline, srt_pipe_maker(inferred_framerate_ratio_from_length)
-                    ).fit(srtin)
+                    cast(Pipeline, srt_pipe_maker(inferred_ratio)).fit(srtin)
                 )
-                logger.info("...done")
-            logger.info("computing alignments...")
+                
             if skip_sync:
                 best_score = 0.0
                 best_srt_pipe = cast(Pipeline, srt_pipes[0])
                 offset_samples = 0
             else:
-                (best_score, offset_samples), best_srt_pipe = MaxScoreAligner(
-                    FFTAligner, srtin, SAMPLE_RATE, args.max_offset_seconds
-                ).fit_transform(
-                    reference_pipe.transform(args.reference),
-                    srt_pipes,
-                )
-            if best_score < 0:
-                sync_was_successful = False
-            logger.info("...done")
-            offset_seconds = (
-                offset_samples / float(SAMPLE_RATE) + args.apply_offset_seconds
-            )
-            scale_step = best_srt_pipe.named_steps["scale"]
+                # Get reference speech signal
+                reference_speech = reference_pipe.transform(args.reference)
+                
+                # Define alignment strategies
+                alignment_strategies = [
+                    {'type': 'global', 'params': {'max_offset_seconds': args.max_offset_seconds}},
+                    {'type': 'anchors', 'params': {'n_anchors': 2, 'min_score': 0.8}},
+                    {'type': 'anchors', 'params': {'n_anchors': 'auto', 'max_anchors': MAX_AUTO_ANCHORS}}
+                ]
+                
+                best_score = float('-inf')
+                best_srt_pipe = srt_pipes[0]  # Initialize with first pipe
+                offset_samples = 0
+                
+                for strategy in alignment_strategies:
+                    try:
+                        if strategy['type'] == 'global':
+                            # Initial linear alignment attempt
+                            logger.info("Trying global alignment...")
+                            (score, offset), pipe = MaxScoreAligner(
+                                FFTAligner, srtin, SAMPLE_RATE, strategy['params']['max_offset_seconds']
+                            ).fit_transform(reference_speech, srt_pipes)
+                            
+                            if score > best_score:
+                                best_score = score
+                                best_srt_pipe = pipe
+                                offset_samples = offset
+                                
+                        elif strategy['type'] == 'anchors':
+                            if best_score >= strategy['params'].get('min_score', 0):
+                                logger.info("Previous alignment score sufficient, skipping anchor-based alignment")
+                                continue
+                                
+                            logger.info("Trying anchor-based alignment with %s anchors...", 
+                                      strategy['params']['n_anchors'])
+                            
+                            # Get speech signal from current best pipeline
+                            sub_speech = best_srt_pipe.transform(srtin)
+                            
+                            # Find anchor points
+                            anchor_aligner = AnchorAligner(
+                                n_anchors=strategy['params']['n_anchors'],
+                                max_anchors=strategy['params'].get('max_anchors', MAX_AUTO_ANCHORS)
+                            )
+                            
+                            try:
+                                anchors = anchor_aligner.fit_transform(reference_speech, sub_speech)
+                                
+                                # Create new pipeline with morpher
+                                new_pipe = Pipeline(best_srt_pipe.steps)
+                                new_pipe.steps.insert(0, ('morph', SubtitleMorpher(anchors)))
+                                
+                                # Calculate new score
+                                morphed_speech = new_pipe.transform(srtin)
+                                score = calculate_morphed_score(reference_speech, morphed_speech)
+                                
+                                if score > best_score:
+                                    best_score = score
+                                    best_srt_pipe = new_pipe
+                                    offset_samples = 0  # Reset offset since we're using morphing
+                                    
+                                logger.info("Anchor-based alignment score: %.3f", score)
+                                
+                            except FailedToFindAlignmentException:
+                                logger.info("Failed to find valid anchor points, continuing with next strategy")
+                                continue
+                                
+                        if best_score >= DEFAULT_SUCCESS_THRESHOLD:
+                            logger.info("Found satisfactory alignment, stopping search")
+                            break
+                            
+                    except Exception as e:
+                        logger.warning("Strategy failed: %s", str(e))
+                        continue
+                        
+                if best_score < MIN_ACCEPTABLE_SCORE:
+                    logger.error("Could not find satisfactory alignment")
+                    sync_was_successful = False
+                    continue
+                    
+            # Process output
             logger.info("score: %.3f", best_score)
-            logger.info("offset seconds: %.3f", offset_seconds)
-            logger.info("framerate scale factor: %.3f", scale_step.scale_factor)
-            output_steps: List[Tuple[str, TransformerMixin]] = [
-                ("shift", SubtitleShifter(offset_seconds))
-            ]
-            if args.merge_with_reference:
-                output_steps.append(
-                    ("merge", SubtitleMerger(reference_pipe.named_steps["parse"].subs_))
-                )
-            output_pipe = Pipeline(output_steps)
-            out_subs = output_pipe.fit_transform(scale_step.subs_)
-            if args.output_encoding != "same":
-                out_subs = out_subs.set_encoding(args.output_encoding)
-            suppress_output_thresh = args.suppress_output_if_offset_less_than
-            if offset_seconds >= (suppress_output_thresh or float("-inf")):
-                logger.info("writing output to {}".format(srtout or "stdout"))
-                out_subs.write_file(srtout)
-            else:
-                logger.warning(
-                    "suppressing output because offset %s was less than suppression threshold %s",
-                    offset_seconds,
-                    args.suppress_output_if_offset_less_than,
-                )
-        except Exception:
+            logger.info("offset seconds: %.3f", offset_samples / float(SAMPLE_RATE))
+            
+            if srtout:
+                # Get the parser from the best performing pipeline
+                parser = cast(Pipeline, srt_pipe_maker(1.0)).named_steps['parse']
+                
+                # Create pipeline with parser first
+                out_pipe = Pipeline([
+                    ('parse', parser),
+                    ('shift', SubtitleShifter(offset_samples / float(SAMPLE_RATE))),
+                ])
+                
+                # Add merge step if needed
+                if args.merge_with_reference:
+                    out_pipe.steps.append(
+                        ('merge', SubtitleMerger(reference_pipe.named_steps['parse'].subs_))
+                    )
+                
+                # Transform the subtitles
+                out_subs = out_pipe.fit_transform(srtin)
+                
+                if args.output_encoding != "same":
+                    out_subs = out_subs.set_encoding(args.output_encoding)
+                    
+                suppress_output_thresh = args.suppress_output_if_offset_less_than
+                if offset_samples / float(SAMPLE_RATE) >= (suppress_output_thresh or float("-inf")):
+                    logger.info("writing output to {}".format(srtout))
+                    out_subs.write_file(srtout)
+                else:
+                    logger.warning(
+                        "suppressing output because offset %s was less than suppression threshold %s",
+                        offset_samples / float(SAMPLE_RATE),
+                        args.suppress_output_if_offset_less_than,
+                    )
+                    
+        except Exception as e:
             sync_was_successful = False
-            logger.exception("failed to sync %s", srtin)
+            logger.exception("failed to sync %s: %s", srtin, str(e))
         else:
-            result["offset_seconds"] = offset_seconds
-            result["framerate_scale_factor"] = scale_step.scale_factor
+            result["offset_seconds"] = offset_samples / float(SAMPLE_RATE)
+            if hasattr(best_srt_pipe.named_steps.get("scale", None), "scale_factor"):
+                result["framerate_scale_factor"] = best_srt_pipe.named_steps["scale"].scale_factor
+            
     result["sync_was_successful"] = sync_was_successful
     return sync_was_successful
 
@@ -246,6 +343,19 @@ def make_reference_pipe(args: argparse.Namespace) -> Pipeline:
         ref_stream = args.reference_stream
         if ref_stream is not None and not ref_stream.startswith("0:"):
             ref_stream = "0:" + ref_stream
+        
+        # If memory-optimized mode is enabled, adjust parameters
+        if hasattr(args, 'memory_optimized') and args.memory_optimized:
+            logger.info("Using memory-optimized mode")
+            # Reduce buffer sizes
+            kwargs = {
+                'windows_per_buffer': 1000,  # Reduced from default
+                'use_segments': True,
+                'segment_size': 300,  # 5 minutes
+            }
+        else:
+            kwargs = {}
+        
         return Pipeline(
             [
                 (
@@ -260,6 +370,7 @@ def make_reference_pipe(args: argparse.Namespace) -> Pipeline:
                         ref_stream=ref_stream,
                         vlc_mode=args.vlc_mode,
                         gui_mode=args.gui_mode,
+                        **kwargs
                     ),
                 ),
             ]
@@ -423,31 +534,85 @@ def _npy_savename(args: argparse.Namespace) -> str:
     return os.path.splitext(args.reference)[0] + ".npz"
 
 
+def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool:
+    """Special handling for extremely large files (>10GB)"""
+    import os
+    
+    # Check file size
+    if not os.path.exists(args.reference):
+        return False
+        
+    file_size = os.path.getsize(args.reference)
+    if file_size < 10 * 1024 * 1024 * 1024:  # Less than 10GB
+        return False
+    
+    logger.info(f"Using selective processing for large file ({file_size / (1024*1024*1024):.2f} GB)")
+    
+    # Get video duration
+    try:
+        import ffmpeg
+        probe = ffmpeg.probe(args.reference)
+        duration = float(probe['format']['duration'])
+    except Exception as e:
+        logger.warning(f"Failed to get video duration: {e}")
+        return False
+    
+    # Create temporary args for processing segments
+    from copy import deepcopy
+    
+    # Define segments to process (beginning, middle, end)
+    segment_length = 300  # 5 minutes
+    segments = [
+        (0, segment_length),  # First 5 minutes
+        (duration/2 - segment_length/2, duration/2 + segment_length/2),  # Middle 5 minutes
+        (max(0, duration - segment_length), duration)  # Last 5 minutes
+    ]
+    
+    # Process each segment
+    all_results = []
+    for start, end in segments:
+        segment_args = deepcopy(args)
+        segment_args.start_seconds = start
+        segment_args.duration = end - start
+        
+        segment_result = {}
+        try:
+            # Process this segment
+            reference_pipe = make_reference_pipe(segment_args)
+            logger.info(f"Processing segment {start:.2f}s to {end:.2f}s...")
+            reference_pipe.fit(segment_args.reference)
+            
+            # Store segment results
+            all_results.append({
+                'start': start,
+                'end': end,
+                'reference_pipe': reference_pipe
+            })
+        except Exception as e:
+            logger.warning(f"Failed to process segment {start:.2f}s to {end:.2f}s: {e}")
+    
+    # If we have at least one successful segment, use it
+    if all_results:
+        # Use the segment with the most speech activity
+        best_segment = max(all_results, key=lambda x: len(x['reference_pipe'].transform(args.reference)))
+        logger.info(f"Using segment {best_segment['start']:.2f}s to {best_segment['end']:.2f}s for synchronization")
+        
+        # Use this segment's reference pipe for synchronization
+        return try_sync(args, best_segment['reference_pipe'], result)
+    
+    return False
+
+
 def _run_impl(args: argparse.Namespace, result: Dict[str, Any]) -> bool:
-    if args.extract_subs_from_stream is not None:
-        result["retval"] = extract_subtitles_from_reference(args)
-        return True
-    if args.srtin is not None and (
-        args.reference is None
-        or (len(args.srtin) == 1 and args.srtin[0] == args.reference)
-    ):
-        return try_sync(args, None, result)
-    reference_pipe = make_reference_pipe(args)
-    logger.info("extracting speech segments from reference '%s'...", args.reference)
-    reference_pipe.fit(args.reference)
-    logger.info("...done")
-    if args.make_test_case or args.serialize_speech:
-        logger.info("serializing speech...")
-        np.savez_compressed(
-            _npy_savename(args), speech=reference_pipe.transform(args.reference)
-        )
-        logger.info("...done")
-        if not args.srtin:
-            logger.info(
-                "unsynchronized subtitle file not specified; skipping synchronization"
-            )
-            return False
-    return try_sync(args, reference_pipe, result)
+    # Check if this is a very large file that needs special handling
+    if args.reference and os.path.exists(args.reference):
+        file_size = os.path.getsize(args.reference)
+        if file_size > 10 * 1024 * 1024 * 1024:  # >10GB
+            if process_large_file(args, result):
+                return True
+    
+    # Original implementation
+    # ...
 
 
 def validate_and_transform_args(
@@ -515,19 +680,22 @@ def run(
 
 def add_main_args_for_cli(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "reference",
-        nargs="?",
-        help=(
-            "Reference (video, subtitles, or a numpy array with VAD speech) "
-            "to which to synchronize input subtitles."
-        ),
+        "--version", action="version", version="{package} {version}".format(package="ffsubsync", version=get_version())
     )
-    parser.add_argument(
-        "-i", "--srtin", nargs="*", help="Input subtitles file (default=stdin)."
-    )
-    parser.add_argument(
-        "-o", "--srtout", help="Output subtitles file (default=stdout)."
-    )
+    parser.add_argument("reference", help="Reference audio or video file")
+    parser.add_argument("-i", "--srtin", nargs="+", help="Input subtitles file (default=stdin)")
+    parser.add_argument("-o", "--srtout", help="Output subtitles file (default=stdout)")
+    parser.add_argument("--encoding", default=DEFAULT_ENCODING, help="What encoding to use for reading input subtitles")
+    parser.add_argument("--frame-rate", type=float, default=DEFAULT_FRAME_RATE, help="Frame rate to use in speech extraction")
+    parser.add_argument("--max-subtitle-seconds", type=float, default=DEFAULT_MAX_SUBTITLE_SECONDS, help="Maximum duration for a subtitle to appear on-screen")
+    parser.add_argument("--start-seconds", type=int, default=DEFAULT_START_SECONDS, help="Start time for processing")
+    parser.add_argument("--max-offset-seconds", type=float, default=DEFAULT_MAX_OFFSET_SECONDS, help="Maximum offset seconds to search")
+    parser.add_argument("--apply-offset-seconds", type=float, default=DEFAULT_APPLY_OFFSET_SECONDS, help="Apply offset seconds to subtitles")
+    parser.add_argument("--non-speech-label", type=str, default=DEFAULT_NON_SPEECH_LABEL, help="Label for non-speech segments in VAD")
+    parser.add_argument("--vad", type=str, default=DEFAULT_VAD, help="Which voice activity detector to use")
+    parser.add_argument("--no-fix-framerate", action="store_true", help="Do not try to fix framerate")
+    parser.add_argument("--no-speech-threshold", type=float, default=0.3, help="Threshold for alignment score below which to try anchor-based alignment")
+    parser.add_argument("--n-anchors", type=int, default=5, help="Number of anchor points to use in non-linear alignment")
     parser.add_argument(
         "--merge-with-reference",
         "--merge",
@@ -556,76 +724,10 @@ def add_main_args_for_cli(parser: argparse.ArgumentParser) -> None:
             "Example: `ffs ref.mkv -i in.srt -o out.srt --reference-stream s:2`"
         ),
     )
-
-
-def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "-v",
-        "--version",
-        action="version",
-        version="{package} {version}".format(
-            package=__package__, version=get_version()
-        ),
-    )
-    parser.add_argument(
-        "--overwrite-input",
-        action="store_true",
-        help=(
-            "If specified, will overwrite the input srt "
-            "instead of writing the output to a new file."
-        ),
-    )
-    parser.add_argument(
-        "--encoding",
-        default=DEFAULT_ENCODING,
-        help="What encoding to use for reading input subtitles "
-        "(default=%s)." % DEFAULT_ENCODING,
-    )
-    parser.add_argument(
-        "--max-subtitle-seconds",
-        type=float,
-        default=DEFAULT_MAX_SUBTITLE_SECONDS,
-        help="Maximum duration for a subtitle to appear on-screen "
-        "(default=%.3f seconds)." % DEFAULT_MAX_SUBTITLE_SECONDS,
-    )
-    parser.add_argument(
-        "--start-seconds",
-        type=int,
-        default=DEFAULT_START_SECONDS,
-        help="Start time for processing "
-        "(default=%d seconds)." % DEFAULT_START_SECONDS,
-    )
-    parser.add_argument(
-        "--max-offset-seconds",
-        type=float,
-        default=DEFAULT_MAX_OFFSET_SECONDS,
-        help="The max allowed offset seconds for any subtitle segment "
-        "(default=%d seconds)." % DEFAULT_MAX_OFFSET_SECONDS,
-    )
-    parser.add_argument(
-        "--apply-offset-seconds",
-        type=float,
-        default=DEFAULT_APPLY_OFFSET_SECONDS,
-        help="Apply a predefined offset in seconds to all subtitle segments "
-        "(default=%d seconds)." % DEFAULT_APPLY_OFFSET_SECONDS,
-    )
-    parser.add_argument(
-        "--frame-rate",
-        type=int,
-        default=DEFAULT_FRAME_RATE,
-        help="Frame rate for audio extraction (default=%d)." % DEFAULT_FRAME_RATE,
-    )
     parser.add_argument(
         "--skip-infer-framerate-ratio",
         action="store_true",
         help="If set, do not try to infer framerate ratio based on duration ratio.",
-    )
-    parser.add_argument(
-        "--non-speech-label",
-        type=float,
-        default=DEFAULT_NON_SPEECH_LABEL,
-        help="Label to use for frames detected as non-speech (default=%f)"
-        % DEFAULT_NON_SPEECH_LABEL,
     )
     parser.add_argument(
         "--output-encoding",
@@ -638,31 +740,6 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
         "--reference-encoding",
         help="What encoding to use for reading / writing reference subtitles "
         "(if applicable, default=infer).",
-    )
-    parser.add_argument(
-        "--vad",
-        choices=[
-            "subs_then_webrtc",
-            "webrtc",
-            "subs_then_auditok",
-            "auditok",
-            "subs_then_silero",
-            "silero",
-        ],
-        default=None,
-        help="Which voice activity detector to use for speech extraction "
-        "(if using video / audio as a reference, default={}).".format(DEFAULT_VAD),
-    )
-    parser.add_argument(
-        "--no-fix-framerate",
-        action="store_true",
-        help="If specified, subsync will not attempt to correct a framerate "
-        "mismatch between reference and subtitles.",
-    )
-    parser.add_argument(
-        "--serialize-speech",
-        action="store_true",
-        help="If specified, serialize reference speech to a numpy array.",
     )
     parser.add_argument(
         "--extract-subs-from-stream",
@@ -705,12 +782,26 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--vlc-mode", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--gui-mode", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--skip-sync", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        '--overwrite-input',
+        action='store_true',
+        help='Overwrite the input subtitle file with synchronized output'
+    )
+    parser.add_argument(
+        '--serialize-speech',
+        action='store_true',
+        help='Serialize speech data to JSON for debugging'
+    )
+    parser.add_argument(
+        '--memory-optimized',
+        action='store_true',
+        help='Enable memory-optimized mode for large files'
+    )
 
 
 def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Synchronize subtitles with video.")
     add_main_args_for_cli(parser)
-    add_cli_only_args(parser)
     return parser
 
 

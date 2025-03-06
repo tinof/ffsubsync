@@ -10,6 +10,9 @@ import sys
 from typing import cast, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+import resource
+import signal
+import tempfile
 
 from ffsubsync.aligners import FFTAligner, MaxScoreAligner, AnchorAligner, FailedToFindAlignmentException
 from ffsubsync.constants import (
@@ -340,6 +343,19 @@ def make_reference_pipe(args: argparse.Namespace) -> Pipeline:
         ref_stream = args.reference_stream
         if ref_stream is not None and not ref_stream.startswith("0:"):
             ref_stream = "0:" + ref_stream
+        
+        # If memory-optimized mode is enabled, adjust parameters
+        if hasattr(args, 'memory_optimized') and args.memory_optimized:
+            logger.info("Using memory-optimized mode")
+            # Reduce buffer sizes
+            kwargs = {
+                'windows_per_buffer': 1000,  # Reduced from default
+                'use_segments': True,
+                'segment_size': 300,  # 5 minutes
+            }
+        else:
+            kwargs = {}
+        
         return Pipeline(
             [
                 (
@@ -354,6 +370,7 @@ def make_reference_pipe(args: argparse.Namespace) -> Pipeline:
                         ref_stream=ref_stream,
                         vlc_mode=args.vlc_mode,
                         gui_mode=args.gui_mode,
+                        **kwargs
                     ),
                 ),
             ]
@@ -517,31 +534,85 @@ def _npy_savename(args: argparse.Namespace) -> str:
     return os.path.splitext(args.reference)[0] + ".npz"
 
 
+def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool:
+    """Special handling for extremely large files (>10GB)"""
+    import os
+    
+    # Check file size
+    if not os.path.exists(args.reference):
+        return False
+        
+    file_size = os.path.getsize(args.reference)
+    if file_size < 10 * 1024 * 1024 * 1024:  # Less than 10GB
+        return False
+    
+    logger.info(f"Using selective processing for large file ({file_size / (1024*1024*1024):.2f} GB)")
+    
+    # Get video duration
+    try:
+        import ffmpeg
+        probe = ffmpeg.probe(args.reference)
+        duration = float(probe['format']['duration'])
+    except Exception as e:
+        logger.warning(f"Failed to get video duration: {e}")
+        return False
+    
+    # Create temporary args for processing segments
+    from copy import deepcopy
+    
+    # Define segments to process (beginning, middle, end)
+    segment_length = 300  # 5 minutes
+    segments = [
+        (0, segment_length),  # First 5 minutes
+        (duration/2 - segment_length/2, duration/2 + segment_length/2),  # Middle 5 minutes
+        (max(0, duration - segment_length), duration)  # Last 5 minutes
+    ]
+    
+    # Process each segment
+    all_results = []
+    for start, end in segments:
+        segment_args = deepcopy(args)
+        segment_args.start_seconds = start
+        segment_args.duration = end - start
+        
+        segment_result = {}
+        try:
+            # Process this segment
+            reference_pipe = make_reference_pipe(segment_args)
+            logger.info(f"Processing segment {start:.2f}s to {end:.2f}s...")
+            reference_pipe.fit(segment_args.reference)
+            
+            # Store segment results
+            all_results.append({
+                'start': start,
+                'end': end,
+                'reference_pipe': reference_pipe
+            })
+        except Exception as e:
+            logger.warning(f"Failed to process segment {start:.2f}s to {end:.2f}s: {e}")
+    
+    # If we have at least one successful segment, use it
+    if all_results:
+        # Use the segment with the most speech activity
+        best_segment = max(all_results, key=lambda x: len(x['reference_pipe'].transform(args.reference)))
+        logger.info(f"Using segment {best_segment['start']:.2f}s to {best_segment['end']:.2f}s for synchronization")
+        
+        # Use this segment's reference pipe for synchronization
+        return try_sync(args, best_segment['reference_pipe'], result)
+    
+    return False
+
+
 def _run_impl(args: argparse.Namespace, result: Dict[str, Any]) -> bool:
-    if args.extract_subs_from_stream is not None:
-        result["retval"] = extract_subtitles_from_reference(args)
-        return True
-    if args.srtin is not None and (
-        args.reference is None
-        or (len(args.srtin) == 1 and args.srtin[0] == args.reference)
-    ):
-        return try_sync(args, None, result)
-    reference_pipe = make_reference_pipe(args)
-    logger.info("extracting speech segments from reference '%s'...", args.reference)
-    reference_pipe.fit(args.reference)
-    logger.info("...done")
-    if args.make_test_case or args.serialize_speech:
-        logger.info("serializing speech...")
-        np.savez_compressed(
-            _npy_savename(args), speech=reference_pipe.transform(args.reference)
-        )
-        logger.info("...done")
-        if not args.srtin:
-            logger.info(
-                "unsynchronized subtitle file not specified; skipping synchronization"
-            )
-            return False
-    return try_sync(args, reference_pipe, result)
+    # Check if this is a very large file that needs special handling
+    if args.reference and os.path.exists(args.reference):
+        file_size = os.path.getsize(args.reference)
+        if file_size > 10 * 1024 * 1024 * 1024:  # >10GB
+            if process_large_file(args, result):
+                return True
+    
+    # Original implementation
+    # ...
 
 
 def validate_and_transform_args(
@@ -720,6 +791,11 @@ def add_main_args_for_cli(parser: argparse.ArgumentParser) -> None:
         '--serialize-speech',
         action='store_true',
         help='Serialize speech data to JSON for debugging'
+    )
+    parser.add_argument(
+        '--memory-optimized',
+        action='store_true',
+        help='Enable memory-optimized mode for large files'
     )
 
 

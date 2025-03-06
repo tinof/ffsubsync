@@ -118,3 +118,9 @@ Credits
 License
 -------
 MIT licensed
+
+## Processing Large Video Files
+
+When working with very large video files (>10GB), you may encounter memory or performance issues. Here are some tips for optimizing the synchronization process:
+
+### Use Memory-Optimized Mode

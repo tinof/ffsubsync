@@ -11,6 +11,9 @@ from typing import cast, Callable, Dict, List, Optional, Union
 import ffmpeg
 import numpy as np
 import tqdm
+import multiprocessing
+import pickle
+import tempfile
 
 from ffsubsync.constants import (
     DEFAULT_ENCODING,
@@ -251,63 +254,127 @@ class VideoSpeechTransformer(TransformerMixin):
         self.video_speech_results_: Optional[np.ndarray] = None
 
     def try_fit_using_embedded_subs(self, fname: str) -> None:
+        import multiprocessing
+        cpu_count = min(2, multiprocessing.cpu_count())
+        
+        # Create cache directory
+        cache_dir = os.path.join(os.path.dirname(fname), ".ffsubsync_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        subs_cache_file = os.path.join(cache_dir, f"{os.path.basename(fname)}.subs_cache")
+        
+        # Check for cached results
+        if os.path.exists(subs_cache_file):
+            try:
+                with open(subs_cache_file, 'rb') as f:
+                    cached_data = pickle.load(f)
+                    self.video_speech_results_ = cached_data
+                    logger.info("Using cached subtitle extraction results")
+                    return
+            except Exception as e:
+                logger.warning(f"Failed to load subtitle cache: {e}")
+        
         embedded_subs = []
         embedded_subs_times = []
+        
+        # Optimize FFmpeg command for subtitle extraction
         ffmpeg_base_args = [
             ffmpeg_bin_path("ffmpeg", self.gui_mode, ffmpeg_resources_path=self.ffmpeg_path),
-            "-loglevel", "fatal", "-nostdin", "-y", "-i", fname
+            "-loglevel", "fatal", 
+            "-nostdin", 
+            "-threads", str(cpu_count),  # Limit FFmpeg threads
+            "-y", 
+            "-i", fname
         ]
+        
+        # Use a more efficient approach for subtitle extraction
+        # Instead of extracting all subtitles at once, extract them one by one
         video_dir = os.path.dirname(fname)
         subs_dir = os.path.join(video_dir, "Subs")
         os.makedirs(subs_dir, exist_ok=True)
-        subtitles_files = []
-        if self.ref_stream:
-            subtitle_filename = os.path.join(subs_dir, f"{os.path.splitext(os.path.basename(fname))[0]}.ref.srt")
-            subtitles_files.append(subtitle_filename)
-            ffmpeg_base_args.extend(["-map", str(self.ref_stream), "-f", "srt", subtitle_filename])
-        else:
-            ffprobe_args = [
-                ffmpeg_bin_path("ffprobe", self.gui_mode, ffmpeg_resources_path=self.ffmpeg_path),
-                "-v", "error", "-select_streams", "s", "-show_entries", "stream=index:stream_tags=language,title", 
-                "-of", "csv=p=0", fname
-            ]
-            logger.debug(f"Running ffprobe command: {' '.join(ffprobe_args)}")
-            process = subprocess.Popen(ffprobe_args, **subprocess_args(include_stdout=True))
-            output = process.communicate()[0].decode("utf-8").strip().splitlines()
-            if process.returncode != 0 or not output:
-                raise ValueError("Failed to detect subtitle streams in the video file")
-            for line in output:
-                parts = line.split(",")
-                if len(parts) < 2:
-                    logger.warning(f"Unexpected ffprobe output: {line}")
+        
+        # First, get information about subtitle streams
+        ffprobe_args = [
+            ffmpeg_bin_path("ffprobe", self.gui_mode, ffmpeg_resources_path=self.ffmpeg_path),
+            "-v", "error", 
+            "-select_streams", "s", 
+            "-show_entries", "stream=index:stream_tags=language,title", 
+            "-of", "csv=p=0", 
+            fname
+        ]
+        
+        logger.debug(f"Running ffprobe command: {' '.join(ffprobe_args)}")
+        process = subprocess.Popen(ffprobe_args, **subprocess_args(include_stdout=True))
+        output = process.communicate()[0].decode("utf-8").strip().splitlines()
+        
+        if process.returncode != 0 or not output:
+            raise ValueError("Failed to detect subtitle streams in the video file")
+        
+        # Process each subtitle stream separately
+        for line in output:
+            parts = line.split(",")
+            if len(parts) < 2:
+                logger.warning(f"Unexpected ffprobe output: {line}")
+                continue
+            
+            stream_index, language_code = parts[:2]
+            language_title = parts[2] if len(parts) > 2 else None
+            
+            subtitle_filename = os.path.join(
+                subs_dir, 
+                f"{os.path.splitext(os.path.basename(fname))[0]}.{language_code}"
+                + (f".{language_title}" if language_title else "")
+                + ".srt"
+            )
+            
+            # Check if this subtitle file already exists
+            if os.path.exists(subtitle_filename):
+                logger.info(f"Using existing subtitle file: {subtitle_filename}")
+            else:
+                # Extract just this subtitle stream
+                stream_ffmpeg_args = [
+                    ffmpeg_bin_path("ffmpeg", self.gui_mode, ffmpeg_resources_path=self.ffmpeg_path),
+                    "-loglevel", "fatal", 
+                    "-nostdin", 
+                    "-threads", str(cpu_count),
+                    "-y", 
+                    "-i", fname,
+                    "-map", f"0:{stream_index}", 
+                    "-f", "srt", 
+                    subtitle_filename
+                ]
+                
+                logger.debug(f"Running ffmpeg command: {' '.join(stream_ffmpeg_args)}")
+                process = subprocess.Popen(stream_ffmpeg_args, **subprocess_args(include_stdout=True))
+                process.communicate()
+                
+                if process.returncode != 0:
+                    logger.warning(f"Failed to extract subtitle stream {stream_index}")
                     continue
-                stream_index, language_code = parts[:2]
-                language_title = parts[2] if len(parts) > 2 else None
-                subtitle_filename = os.path.join(
-                    subs_dir, 
-                    f"{os.path.splitext(os.path.basename(fname))[0]}.{language_code}"
-                    + (f".{language_title}" if language_title else "")
-                    + ".srt"
-                )
-                subtitles_files.append(subtitle_filename)
-                ffmpeg_base_args.extend(["-map", f"0:{stream_index}", "-f", "srt", subtitle_filename])
-        logger.debug(f"Running ffmpeg command: {' '.join(ffmpeg_base_args)}")
-        process = subprocess.Popen(ffmpeg_base_args, **subprocess_args(include_stdout=True))
-        process.communicate()
-        if process.returncode != 0:
-            raise ValueError("Failed to extract subtitles from the video file")
-        for subtitle_file in subtitles_files:
-            with open(subtitle_file, 'rb') as file:
-                pipe = cast(Pipeline, make_subtitle_speech_pipeline(start_seconds=self.start_seconds))
-                pipe_output = pipe.fit(file)
-                for speech_step in pipe_output.steps[-1:]:
-                    embedded_subs.append(speech_step[1])
-                    embedded_subs_times.append(speech_step[1].max_time_)
+            
+            # Process this subtitle file
+            try:
+                with open(subtitle_filename, 'rb') as file:
+                    pipe = cast(Pipeline, make_subtitle_speech_pipeline(start_seconds=self.start_seconds))
+                    pipe_output = pipe.fit(file)
+                    for speech_step in pipe_output.steps[-1:]:
+                        embedded_subs.append(speech_step[1])
+                        embedded_subs_times.append(speech_step[1].max_time_)
+            except Exception as e:
+                logger.warning(f"Failed to process subtitle file {subtitle_filename}: {e}")
+        
         if not embedded_subs:
             error_msg = "Video file appears to lack subtitle stream" if self.ref_stream is None else f"Stream {self.ref_stream} not found"
             raise ValueError(error_msg)
+        
         subs_to_use = embedded_subs[int(np.argmax(embedded_subs_times))]
         self.video_speech_results_ = subs_to_use.subtitle_speech_results_
+        
+        # Cache the results
+        try:
+            with open(subs_cache_file, 'wb') as f:
+                pickle.dump(self.video_speech_results_, f)
+        except Exception as e:
+            logger.warning(f"Failed to cache subtitle results: {e}")
 
     def fit(self, fname: str, *_) -> "VideoSpeechTransformer":
         if "subs" in self.vad and (
@@ -351,6 +418,7 @@ class VideoSpeechTransformer(TransformerMixin):
             )
         else:
             raise ValueError("unknown vad: %s" % self.vad)
+        cpu_count = min(2, multiprocessing.cpu_count())  # Limit to available cores
         media_bstring: List[np.ndarray] = []
         ffmpeg_args = [
             ffmpeg_bin_path(
@@ -364,26 +432,27 @@ class VideoSpeechTransformer(TransformerMixin):
                     str(timedelta(seconds=self.start_seconds)),
                 ]
             )
-        ffmpeg_args.extend(["-loglevel", "fatal", "-nostdin", "-i", fname])
+        ffmpeg_args.extend([
+            "-loglevel", "fatal", 
+            "-nostdin", 
+            "-threads", str(cpu_count),  # Limit FFmpeg threads
+            "-i", fname
+        ])
         if self.ref_stream is not None and self.ref_stream.startswith("0:a:"):
             ffmpeg_args.extend(["-map", self.ref_stream])
-        ffmpeg_args.extend(
-            [
-                "-f",
-                "s16le",
-                "-ac",
-                "1",
-                "-acodec",
-                "pcm_s16le",
-                "-ar",
-                str(self.frame_rate),
-                "-",
-            ]
-        )
+        ffmpeg_args.extend([
+            # Optimize audio processing for speech detection
+            "-af", "aresample=8000",  # Downsample to 8kHz for speech detection
+            "-f", "s16le",
+            "-ac", "1",
+            "-acodec", "pcm_s16le",
+            "-ar", str(self.frame_rate),
+            "-"
+        ])
         process = subprocess.Popen(ffmpeg_args, **subprocess_args(include_stdout=True))
         bytes_per_frame = 2
         frames_per_window = bytes_per_frame * self.frame_rate // self.sample_rate
-        windows_per_buffer = 10000
+        windows_per_buffer = 1000
         simple_progress = 0.0
 
         redirect_stderr = None

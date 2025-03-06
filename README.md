@@ -56,7 +56,7 @@ pipx ensurepath
 
 Alternatively, you can install directly:
 ~~~
-pipx install git+https://github.com/tinof/ffsubsync.git@ffsubsync-ae
+pipx install git+https://github.com/tinof/ffsubsync.git
 ~~~
 
 Usage

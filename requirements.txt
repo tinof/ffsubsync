@@ -13,7 +13,7 @@ tqdm
 typing_extensions
 webrtcvad
 scipy>=1.7.0
-pyfftw>=0.13.0  # For optimized FFT operations
+pyFFTW # For optimized FFT operations
 psutil>=5.8.0    # For memory monitoring
 concurrent-log-handler>=0.9.20  # For thread-safe logging
 multiprocess>=0.70.12  # Enhanced multiprocessing capabilities

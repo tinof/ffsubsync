@@ -13,6 +13,7 @@ import numpy as np
 import resource
 import signal
 import tempfile
+import traceback
 
 from ffsubsync.aligners import FFTAligner, MaxScoreAligner, AnchorAligner, FailedToFindAlignmentException
 from ffsubsync.constants import (
@@ -154,6 +155,9 @@ def try_sync(
     if not args.srtin:
         args.srtin = [None]
         
+    # Define excellent threshold for early termination
+    EXCELLENT_THRESHOLD = 0.95
+        
     for srtin in args.srtin:
         try:
             skip_sync = args.skip_sync or reference_pipe is None
@@ -201,67 +205,144 @@ def try_sync(
                 best_srt_pipe = srt_pipes[0]  # Initialize with first pipe
                 offset_samples = 0
                 
-                for strategy in alignment_strategies:
+                # Function to test a single framerate ratio
+                def test_framerate_ratio(ratio_pipe):
                     try:
-                        if strategy['type'] == 'global':
-                            # Initial linear alignment attempt
-                            logger.info("Trying global alignment...")
-                            (score, offset), pipe = MaxScoreAligner(
-                                FFTAligner, srtin, SAMPLE_RATE, strategy['params']['max_offset_seconds']
-                            ).fit_transform(reference_speech, srt_pipes)
+                        # Extract speech from subtitle with this framerate ratio
+                        sub_speech = ratio_pipe.transform(srtin)
+                        
+                        # Try global alignment first
+                        fft_aligner = FFTAligner(
+                            max_offset_samples=int(args.max_offset_seconds * SAMPLE_RATE),
+                            use_progressive=True
+                        )
+                        fft_aligner.fit(reference_speech, sub_speech)
+                        score, offset = fft_aligner.best_score_, fft_aligner.best_offset_
+                        
+                        return (score, offset), ratio_pipe
+                    except Exception as e:
+                        logger.warning(f"Error testing framerate ratio: {e}")
+                        return (float('-inf'), 0), ratio_pipe
+                
+                # Process framerate ratios in parallel if enabled
+                if getattr(args, 'parallel', False) and len(srt_pipes) > 1:
+                    try:
+                        import multiprocessing
+                        from concurrent.futures import ProcessPoolExecutor, as_completed
+                        
+                        logger.info(f"Testing {len(srt_pipes)} framerate ratios in parallel")
+                        max_workers = min(multiprocessing.cpu_count(), len(srt_pipes))
+                        
+                        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                            futures = [executor.submit(test_framerate_ratio, pipe) for pipe in srt_pipes]
+                            
+                            ratio_results = []
+                            for future in as_completed(futures):
+                                try:
+                                    result = future.result()
+                                    ratio_results.append(result)
+                                except Exception as e:
+                                    logger.warning(f"Error in parallel processing: {e}")
+                        
+                        # Find best result
+                        if ratio_results:
+                            (score, offset), pipe = max(ratio_results, key=lambda x: x[0][0])
                             
                             if score > best_score:
                                 best_score = score
                                 best_srt_pipe = pipe
                                 offset_samples = offset
                                 
-                        elif strategy['type'] == 'anchors':
-                            if best_score >= strategy['params'].get('min_score', 0):
-                                logger.info("Previous alignment score sufficient, skipping anchor-based alignment")
-                                continue
-                                
-                            logger.info("Trying anchor-based alignment with %s anchors...", 
-                                      strategy['params']['n_anchors'])
+                            logger.info(f"Best framerate ratio score: {best_score:.3f}")
                             
-                            # Get speech signal from current best pipeline
-                            sub_speech = best_srt_pipe.transform(srtin)
+                            # Early termination if we have an excellent match
+                            if best_score >= EXCELLENT_THRESHOLD:
+                                logger.info(f"Found excellent match (score: {best_score:.3f}), skipping further strategies")
+                                
+                    except ImportError:
+                        logger.warning("Parallel processing requested but multiprocessing not available")
+                        # Fall back to sequential processing
+                        for pipe in srt_pipes:
+                            (score, offset), pipe = test_framerate_ratio(pipe)
+                            if score > best_score:
+                                best_score = score
+                                best_srt_pipe = pipe
+                                offset_samples = offset
+                else:
+                    # Sequential processing of framerate ratios
+                    for pipe in srt_pipes:
+                        (score, offset), pipe = test_framerate_ratio(pipe)
+                        if score > best_score:
+                            best_score = score
+                            best_srt_pipe = pipe
+                            offset_samples = offset
                             
-                            # Find anchor points
-                            anchor_aligner = AnchorAligner(
-                                n_anchors=strategy['params']['n_anchors'],
-                                max_anchors=strategy['params'].get('max_anchors', MAX_AUTO_ANCHORS)
-                            )
-                            
-                            try:
-                                anchors = anchor_aligner.fit_transform(reference_speech, sub_speech)
-                                
-                                # Create new pipeline with morpher
-                                new_pipe = Pipeline(best_srt_pipe.steps)
-                                new_pipe.steps.insert(0, ('morph', SubtitleMorpher(anchors)))
-                                
-                                # Calculate new score
-                                morphed_speech = new_pipe.transform(srtin)
-                                score = calculate_morphed_score(reference_speech, morphed_speech)
-                                
-                                if score > best_score:
-                                    best_score = score
-                                    best_srt_pipe = new_pipe
-                                    offset_samples = 0  # Reset offset since we're using morphing
-                                    
-                                logger.info("Anchor-based alignment score: %.3f", score)
-                                
-                            except FailedToFindAlignmentException:
-                                logger.info("Failed to find valid anchor points, continuing with next strategy")
-                                continue
-                                
-                        if best_score >= DEFAULT_SUCCESS_THRESHOLD:
-                            logger.info("Found satisfactory alignment, stopping search")
+                        # Early termination if we have an excellent match
+                        if best_score >= EXCELLENT_THRESHOLD:
+                            logger.info(f"Found excellent match (score: {best_score:.3f}), skipping further ratios")
                             break
+                
+                # If we don't have a good enough score yet, try anchor-based alignment
+                if best_score < DEFAULT_SUCCESS_THRESHOLD:
+                    for strategy in alignment_strategies:
+                        try:
+                            if strategy['type'] == 'global':
+                                # We already did global alignment during framerate ratio testing
+                                continue
+                                
+                            elif strategy['type'] == 'anchors':
+                                if best_score >= strategy['params'].get('min_score', 0):
+                                    logger.info("Previous alignment score sufficient, skipping anchor-based alignment")
+                                    continue
+                                    
+                                logger.info("Trying anchor-based alignment with %s anchors...", 
+                                          strategy['params']['n_anchors'])
+                                
+                                # Get speech signal from current best pipeline
+                                sub_speech = best_srt_pipe.transform(srtin)
+                                
+                                # Find anchor points with content-aware selection
+                                anchor_aligner = AnchorAligner(
+                                    n_anchors=strategy['params']['n_anchors'],
+                                    max_anchors=strategy['params'].get('max_anchors', MAX_AUTO_ANCHORS),
+                                    content_aware=True
+                                )
+                                
+                                try:
+                                    anchors = anchor_aligner.fit_transform(reference_speech, sub_speech)
+                                    
+                                    # Create new pipeline with morpher
+                                    new_pipe = Pipeline(best_srt_pipe.steps)
+                                    new_pipe.steps.insert(0, ('morph', SubtitleMorpher(anchors)))
+                                    
+                                    # Calculate new score
+                                    morphed_speech = new_pipe.transform(srtin)
+                                    score = calculate_morphed_score(reference_speech, morphed_speech)
+                                    
+                                    if score > best_score:
+                                        best_score = score
+                                        best_srt_pipe = new_pipe
+                                        offset_samples = 0  # Reset offset since we're using morphing
+                                        
+                                    logger.info("Anchor-based alignment score: %.3f", score)
+                                    
+                                    # Early termination if we have an excellent match
+                                    if best_score >= EXCELLENT_THRESHOLD:
+                                        logger.info(f"Found excellent match (score: {best_score:.3f}), stopping search")
+                                        break
+                                    
+                                except FailedToFindAlignmentException:
+                                    logger.info("Failed to find valid anchor points, continuing with next strategy")
+                                    continue
+                                    
+                            if best_score >= DEFAULT_SUCCESS_THRESHOLD:
+                                logger.info("Found satisfactory alignment, stopping search")
+                                break
+                                
+                        except Exception as e:
+                            logger.warning("Strategy failed: %s", str(e))
+                            continue
                             
-                    except Exception as e:
-                        logger.warning("Strategy failed: %s", str(e))
-                        continue
-                        
                 if best_score < MIN_ACCEPTABLE_SCORE:
                     logger.error("Could not find satisfactory alignment")
                     sync_was_successful = False
@@ -535,84 +616,244 @@ def _npy_savename(args: argparse.Namespace) -> str:
 
 
 def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool:
-    """Special handling for extremely large files (>10GB)"""
+    """Optimized processing for large files using selective segment analysis.
+    
+    This function:
+    1. Divides the file into strategic segments
+    2. Processes each segment in parallel if possible
+    3. Selects the best segment for synchronization
+    4. Uses memory-efficient processing throughout
+    """
     import os
+    import tempfile
+    from copy import deepcopy
     
     # Check file size
     if not os.path.exists(args.reference):
         return False
         
     file_size = os.path.getsize(args.reference)
-    if file_size < 10 * 1024 * 1024 * 1024:  # Less than 10GB
-        return False
-    
-    logger.info(f"Using selective processing for large file ({file_size / (1024*1024*1024):.2f} GB)")
+    logger.info(f"Using optimized processing for large file ({file_size / (1024*1024*1024):.2f} GB)")
     
     # Get video duration
     try:
         import ffmpeg
         probe = ffmpeg.probe(args.reference)
         duration = float(probe['format']['duration'])
+        logger.info(f"Video duration: {duration:.2f} seconds")
     except Exception as e:
         logger.warning(f"Failed to get video duration: {e}")
-        return False
+        # Estimate duration based on file size and bitrate
+        # Assume ~5 Mbps for typical video
+        estimated_bitrate = 5 * 1024 * 1024  # 5 Mbps
+        duration = (file_size * 8) / estimated_bitrate
+        logger.info(f"Estimated duration: {duration:.2f} seconds")
     
-    # Create temporary args for processing segments
-    from copy import deepcopy
-    
-    # Define segments to process (beginning, middle, end)
-    segment_length = 300  # 5 minutes
-    segments = [
-        (0, segment_length),  # First 5 minutes
-        (duration/2 - segment_length/2, duration/2 + segment_length/2),  # Middle 5 minutes
-        (max(0, duration - segment_length), duration)  # Last 5 minutes
-    ]
-    
-    # Process each segment
-    all_results = []
-    for start, end in segments:
-        segment_args = deepcopy(args)
-        segment_args.start_seconds = start
-        segment_args.duration = end - start
+    # Create temporary directory for segment processing
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Define segments to process based on file size
+        if file_size > 20 * 1024 * 1024 * 1024:  # >20GB
+            # For very large files, process just a few strategic points
+            segment_length = 300  # 5 minutes
+            segments = [
+                (0, segment_length),  # First 5 minutes
+                (duration/2 - segment_length/2, duration/2 + segment_length/2),  # Middle 5 minutes
+                (max(0, duration - segment_length), duration)  # Last 5 minutes
+            ]
+        elif file_size > 10 * 1024 * 1024 * 1024:  # 10-20GB
+            # For large files, process more segments
+            segment_length = 600  # 10 minutes
+            segments = [
+                (0, segment_length),  # First 10 minutes
+                (duration/4 - segment_length/2, duration/4 + segment_length/2),  # 25% point
+                (duration/2 - segment_length/2, duration/2 + segment_length/2),  # Middle
+                (3*duration/4 - segment_length/2, 3*duration/4 + segment_length/2),  # 75% point
+                (max(0, duration - segment_length), duration)  # Last 10 minutes
+            ]
+        else:  # 5-10GB
+            # For medium files, use more granular segments
+            segment_count = 8
+            segment_length = duration / segment_count
+            segments = [(i * segment_length, (i + 1) * segment_length) for i in range(segment_count)]
         
-        segment_result = {}
-        try:
-            # Process this segment
-            reference_pipe = make_reference_pipe(segment_args)
-            logger.info(f"Processing segment {start:.2f}s to {end:.2f}s...")
-            reference_pipe.fit(segment_args.reference)
+        logger.info(f"Processing {len(segments)} segments")
+        
+        # Function to process a single segment
+        def process_segment(segment_idx, start, end):
+            segment_args = deepcopy(args)
+            segment_args.start_seconds = start
+            segment_args.max_seconds = end - start
+            segment_args.memory_optimized = False  # Avoid recursive optimization
             
-            # Store segment results
-            all_results.append({
-                'start': start,
-                'end': end,
-                'reference_pipe': reference_pipe
-            })
-        except Exception as e:
-            logger.warning(f"Failed to process segment {start:.2f}s to {end:.2f}s: {e}")
-    
-    # If we have at least one successful segment, use it
-    if all_results:
-        # Use the segment with the most speech activity
-        best_segment = max(all_results, key=lambda x: len(x['reference_pipe'].transform(args.reference)))
-        logger.info(f"Using segment {best_segment['start']:.2f}s to {best_segment['end']:.2f}s for synchronization")
+            # Create unique output path for this segment
+            segment_output = os.path.join(temp_dir, f"segment_{segment_idx}.npz")
+            
+            try:
+                # Extract speech from this segment
+                reference_pipe = make_reference_pipe(segment_args)
+                if reference_pipe is None:
+                    return None
+                    
+                reference_pipe.fit(segment_args.reference)
+                speech = reference_pipe.transform(segment_args.reference)
+                
+                # Save speech data for this segment
+                np.savez_compressed(
+                    segment_output,
+                    speech=speech,
+                    start=start,
+                    end=end,
+                    sample_rate=SAMPLE_RATE
+                )
+                
+                # Calculate speech activity metrics
+                speech_activity = np.mean(speech)
+                speech_transitions = np.sum(np.abs(np.diff(speech)))
+                
+                return {
+                    'idx': segment_idx,
+                    'start': start,
+                    'end': end,
+                    'speech_activity': speech_activity,
+                    'speech_transitions': speech_transitions,
+                    'output_path': segment_output
+                }
+            except Exception as e:
+                logger.warning(f"Failed to process segment {segment_idx} ({start:.2f}s to {end:.2f}s): {e}")
+                return None
         
-        # Use this segment's reference pipe for synchronization
-        return try_sync(args, best_segment['reference_pipe'], result)
-    
-    return False
+        # Process segments (in parallel if possible)
+        segment_results = []
+        try:
+            # Try parallel processing
+            import multiprocessing
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+            
+            logger.info("Processing segments in parallel")
+            max_workers = min(multiprocessing.cpu_count(), len(segments))
+            
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(process_segment, i, start, end) 
+                    for i, (start, end) in enumerate(segments)
+                ]
+                
+                for future in as_completed(futures):
+                    try:
+                        segment_result = future.result()
+                        if segment_result:
+                            segment_results.append(segment_result)
+                    except Exception as e:
+                        logger.warning(f"Error in parallel segment processing: {e}")
+                        
+        except (ImportError, Exception) as e:
+            # Fall back to sequential processing
+            logger.warning(f"Parallel processing failed, falling back to sequential: {e}")
+            for i, (start, end) in enumerate(segments):
+                segment_result = process_segment(i, start, end)
+                if segment_result:
+                    segment_results.append(segment_result)
+        
+        # If we have at least one successful segment, use it for synchronization
+        if not segment_results:
+            logger.error("All segments failed to process")
+            return False
+            
+        # Select best segment based on speech activity and transitions
+        # Prioritize segments with both high speech activity and many transitions
+        for segment in segment_results:
+            segment['score'] = segment['speech_activity'] * segment['speech_transitions']
+            
+        best_segment = max(segment_results, key=lambda x: x['score'])
+        logger.info(f"Selected segment {best_segment['idx']} ({best_segment['start']:.2f}s to {best_segment['end']:.2f}s) "
+                   f"with score {best_segment['score']:.4f}")
+        
+        # Load the best segment's speech data
+        segment_data = np.load(best_segment['output_path'])
+        speech = segment_data['speech']
+        
+        # Create a reference pipe with this segment's speech data
+        class SegmentSpeechTransformer(TransformerMixin):
+            def __init__(self, speech_data):
+                self.speech_data = speech_data
+                
+            def fit(self, *_):
+                return self
+                
+            def transform(self, *_):
+                return self.speech_data
+        
+        # Create a pipeline with the segment speech transformer
+        segment_pipe = Pipeline([
+            ('speech', SegmentSpeechTransformer(speech))
+        ])
+        
+        # Adjust args for this segment
+        segment_args = deepcopy(args)
+        segment_args.start_seconds = best_segment['start']
+        segment_args.max_seconds = best_segment['end'] - best_segment['start']
+        
+        # Run synchronization with this segment
+        return try_sync(segment_args, segment_pipe, result)
 
 
 def _run_impl(args: argparse.Namespace, result: Dict[str, Any]) -> bool:
     # Check if this is a very large file that needs special handling
-    if args.reference and os.path.exists(args.reference):
+    if args.reference and os.path.exists(args.reference) and args.memory_optimized:
         file_size = os.path.getsize(args.reference)
-        if file_size > 10 * 1024 * 1024 * 1024:  # >10GB
+        if file_size > 5 * 1024 * 1024 * 1024:  # >5GB
+            logger.info(f"Large file detected ({file_size / (1024*1024*1024):.2f} GB), using memory-optimized processing")
             if process_large_file(args, result):
                 return True
+            # If large file processing failed, fall back to standard processing
+            logger.info("Memory-optimized processing failed, falling back to standard processing")
     
-    # Original implementation
-    # ...
+    # Apply max duration limit if specified
+    if args.max_duration is not None and args.reference and os.path.exists(args.reference):
+        logger.info(f"Limiting processing to first {args.max_duration} seconds")
+        args.start_seconds = args.start_seconds or 0
+        args.duration = args.max_duration
+    
+    # Standard processing
+    if args.extract_subs_from_stream is not None:
+        return extract_subtitles_from_reference(args) == 0
+    if args.make_test_case and not os.path.exists(args.reference):
+        logger.error("need reference file to exist for test case")
+        return False
+    if args.overwrite_input:
+        if len(args.srtin) != 1:
+            logger.error("need exactly one input subtitle file for overwriting")
+            return False
+        args.srtout = args.srtin[0]
+    reference_pipe = make_reference_pipe(args)
+    if reference_pipe is None:
+        return False
+    logger.info("extracting speech segments from reference '%s'...", args.reference)
+    try:
+        reference_pipe.fit(args.reference)
+        if args.make_test_case:
+            npy_savename = _npy_savename(args)
+            logger.info("saving speech extraction to %s", npy_savename)
+            np.savez_compressed(
+                npy_savename,
+                speech=reference_pipe.transform(args.reference),
+                sample_rate=SAMPLE_RATE,
+            )
+        if args.serialize_speech:
+            logger.info("serializing speech...")
+            result["speech_streams"] = reference_pipe.transform(args.reference)
+            return True
+        elif args.extract_subs:
+            logger.info("extracting subtitles...")
+            result["extracted_subs"] = reference_pipe.transform(args.reference)
+            return True
+        else:
+            return try_sync(args, reference_pipe, result)
+    except Exception as e:
+        logger.error(e)
+        if args.gui_mode:
+            logger.error("Traceback: %s", traceback.format_exc())
+        return False
 
 
 def validate_and_transform_args(
@@ -718,10 +959,8 @@ def add_main_args_for_cli(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "Which stream/track in the video file to use as reference, "
-            "formatted according to ffmpeg conventions. For example, 0:s:0 "
-            "uses the first subtitle track; 0:a:3 would use the third audio track. "
-            "You can also drop the leading `0:`; i.e. use s:0 or a:3, respectively. "
-            "Example: `ffs ref.mkv -i in.srt -o out.srt --reference-stream s:2`"
+            "formatted according to ffmpeg conventions. For example, "
+            "s:0 is the first subtitle track; a:3 is the fourth audio track."
         ),
     )
     parser.add_argument(
@@ -796,6 +1035,24 @@ def add_main_args_for_cli(parser: argparse.ArgumentParser) -> None:
         '--memory-optimized',
         action='store_true',
         help='Enable memory-optimized mode for large files'
+    )
+    parser.add_argument(
+        '--content-aware',
+        action='store_true',
+        default=True,
+        help='Enable content-aware anchor selection (default: enabled)'
+    )
+    parser.add_argument(
+        '--progressive',
+        action='store_true',
+        default=True,
+        help='Enable progressive multi-resolution alignment (default: enabled)'
+    )
+    parser.add_argument(
+        '--max-duration',
+        type=float,
+        default=None,
+        help='Maximum duration (in seconds) to process from the reference'
     )
 
 

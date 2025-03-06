@@ -317,3 +317,47 @@ The optimizations include:
 - Optimized FFmpeg commands with thread control
 - Automatic resource limiting to prevent crashes
 - Checkpoint system for resumable processing
+
+## Processing Very Large 4K Files
+
+For extremely large 4K files (>20GB), the simplest approach is to use auto-optimization:
+
+```bash
+ffsubsync large_4k_video.mkv -i subtitles.srt -o synced.srt --auto-optimize
+```
+
+If you encounter issues with auto-optimization on very large files, try these specific solutions:
+
+1. **Memory Errors**
+
+If you see "out of memory" errors:
+```bash
+ffsubsync large_4k_video.mkv -i subtitles.srt -o synced.srt --segment-length 120 --max-duration 900
+```
+This uses shorter segments (2 minutes) and limits processing to the first 15 minutes.
+
+2. **Processor-Related Errors**
+
+On systems with limited CPU:
+```bash
+ffsubsync large_4k_video.mkv -i subtitles.srt -o synced.srt --memory-optimized --vad=auditok
+```
+This uses a less CPU-intensive voice detection algorithm.
+
+3. **Extract Audio First**
+
+For most reliable processing of very large 4K files:
+```bash
+# Extract first 15 minutes of audio
+ffmpeg -i large_4k_video.mkv -t 900 -vn -acodec pcm_s16le -ar 16000 -ac 1 audio.wav
+
+# Use the extracted audio for synchronization
+ffsubsync audio.wav -i subtitles.srt -o synced.srt --auto-optimize
+```
+
+4. **Last Resort for Extremely Limited Systems**
+
+On systems with very limited resources:
+```bash
+ffsubsync large_4k_video.mkv -i subtitles.srt -o synced.srt --segment-length 60 --max-duration 600 --vad=auditok --no-fix-framerate --memory-optimized
+```

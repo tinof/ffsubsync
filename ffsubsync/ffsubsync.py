@@ -426,17 +426,16 @@ def make_reference_pipe(args: argparse.Namespace) -> Pipeline:
         if ref_stream is not None and not ref_stream.startswith("0:"):
             ref_stream = "0:" + ref_stream
         
+        # Setup valid kwargs for VideoSpeechTransformer
+        # Only pass valid parameters to VideoSpeechTransformer
+        kwargs = {}
+        
         # If memory-optimized mode is enabled, adjust parameters
         if hasattr(args, 'memory_optimized') and args.memory_optimized:
             logger.info("Using memory-optimized mode")
-            # Reduce buffer sizes
-            kwargs = {
-                'windows_per_buffer': 1000,  # Reduced from default
-                'use_segments': True,
-                'segment_size': 300,  # 5 minutes
-            }
-        else:
-            kwargs = {}
+            # Add valid memory optimization parameters
+            kwargs['use_segments'] = True
+            kwargs['segment_size'] = getattr(args, 'segment_length', 300)  # Use segment_length if defined
         
         return Pipeline(
             [
@@ -616,6 +615,74 @@ def _npy_savename(args: argparse.Namespace) -> str:
     return os.path.splitext(args.reference)[0] + ".npz"
 
 
+# Define process_segment outside of process_large_file to make it pickleable
+def _process_segment(args_dict, segment_idx, start, end, temp_dir):
+    """Process a single video segment for speech extraction.
+    
+    Args:
+        args_dict: Dictionary of arguments (serializable version of args)
+        segment_idx: Index of this segment
+        start: Start time in seconds
+        end: End time in seconds
+        temp_dir: Path to temporary directory for output
+        
+    Returns:
+        Dictionary with segment information or None if processing failed
+    """
+    import os
+    import numpy as np
+    from copy import deepcopy
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    # Re-create args from dictionary
+    from argparse import Namespace
+    segment_args = Namespace(**args_dict)
+    
+    # Set segment-specific parameters
+    segment_args.start_seconds = start
+    segment_args.max_seconds = end - start
+    segment_args.memory_optimized = False  # Avoid recursive optimization
+    
+    # Create unique output path for this segment
+    segment_output = os.path.join(temp_dir, f"segment_{segment_idx}.npz")
+    
+    try:
+        # Extract speech from this segment
+        reference_pipe = make_reference_pipe(segment_args)
+        if reference_pipe is None:
+            return None
+            
+        reference_pipe.fit(segment_args.reference)
+        speech = reference_pipe.transform(segment_args.reference)
+        
+        # Save speech data for this segment
+        np.savez_compressed(
+            segment_output,
+            speech=speech,
+            start=start,
+            end=end,
+            sample_rate=SAMPLE_RATE
+        )
+        
+        # Calculate speech activity metrics
+        speech_activity = np.mean(speech)
+        speech_transitions = np.sum(np.abs(np.diff(speech)))
+        
+        return {
+            'idx': segment_idx,
+            'start': start,
+            'end': end,
+            'speech_activity': speech_activity,
+            'speech_transitions': speech_transitions,
+            'output_path': segment_output
+        }
+    except Exception as e:
+        logger.warning(f"Failed to process segment {segment_idx} ({start:.2f}s to {end:.2f}s): {e}")
+        return None
+
+
 def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool:
     """Optimized processing for large files using selective segment analysis.
     
@@ -653,23 +720,23 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
     # Create temporary directory for segment processing
     with tempfile.TemporaryDirectory() as temp_dir:
         # Define segments to process based on file size
+        segment_length = getattr(args, 'segment_length', 300)  # Default to 5 minutes if not specified
+        
         if file_size > 20 * 1024 * 1024 * 1024:  # >20GB
             # For very large files, process just a few strategic points
-            segment_length = 300  # 5 minutes
             segments = [
-                (0, segment_length),  # First 5 minutes
-                (duration/2 - segment_length/2, duration/2 + segment_length/2),  # Middle 5 minutes
-                (max(0, duration - segment_length), duration)  # Last 5 minutes
+                (0, segment_length),  # First segment
+                (duration/2 - segment_length/2, duration/2 + segment_length/2),  # Middle segment
+                (max(0, duration - segment_length), duration)  # Last segment
             ]
         elif file_size > 10 * 1024 * 1024 * 1024:  # 10-20GB
             # For large files, process more segments
-            segment_length = 600  # 10 minutes
             segments = [
-                (0, segment_length),  # First 10 minutes
+                (0, segment_length),  # First segment
                 (duration/4 - segment_length/2, duration/4 + segment_length/2),  # 25% point
                 (duration/2 - segment_length/2, duration/2 + segment_length/2),  # Middle
                 (3*duration/4 - segment_length/2, 3*duration/4 + segment_length/2),  # 75% point
-                (max(0, duration - segment_length), duration)  # Last 10 minutes
+                (max(0, duration - segment_length), duration)  # Last segment
             ]
         else:  # 5-10GB
             # For medium files, use more granular segments
@@ -679,54 +746,14 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
         
         logger.info(f"Processing {len(segments)} segments")
         
-        # Function to process a single segment
-        def process_segment(segment_idx, start, end):
-            segment_args = deepcopy(args)
-            segment_args.start_seconds = start
-            segment_args.max_seconds = end - start
-            segment_args.memory_optimized = False  # Avoid recursive optimization
-            
-            # Create unique output path for this segment
-            segment_output = os.path.join(temp_dir, f"segment_{segment_idx}.npz")
-            
-            try:
-                # Extract speech from this segment
-                reference_pipe = make_reference_pipe(segment_args)
-                if reference_pipe is None:
-                    return None
-                    
-                reference_pipe.fit(segment_args.reference)
-                speech = reference_pipe.transform(segment_args.reference)
-                
-                # Save speech data for this segment
-                np.savez_compressed(
-                    segment_output,
-                    speech=speech,
-                    start=start,
-                    end=end,
-                    sample_rate=SAMPLE_RATE
-                )
-                
-                # Calculate speech activity metrics
-                speech_activity = np.mean(speech)
-                speech_transitions = np.sum(np.abs(np.diff(speech)))
-                
-                return {
-                    'idx': segment_idx,
-                    'start': start,
-                    'end': end,
-                    'speech_activity': speech_activity,
-                    'speech_transitions': speech_transitions,
-                    'output_path': segment_output
-                }
-            except Exception as e:
-                logger.warning(f"Failed to process segment {segment_idx} ({start:.2f}s to {end:.2f}s): {e}")
-                return None
+        # Convert args to a serializable dictionary for multiprocessing
+        args_dict = args.__dict__.copy()
         
         # Process segments (in parallel if possible)
         segment_results = []
         try:
             # Try parallel processing
+            import multiprocessing
             from concurrent.futures import ProcessPoolExecutor, as_completed
             
             logger.info("Processing segments in parallel")
@@ -734,7 +761,7 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
             
             with ProcessPoolExecutor(max_workers=max_workers) as executor:
                 futures = [
-                    executor.submit(process_segment, i, start, end) 
+                    executor.submit(_process_segment, args_dict, i, start, end, temp_dir) 
                     for i, (start, end) in enumerate(segments)
                 ]
                 
@@ -750,7 +777,7 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
             # Fall back to sequential processing
             logger.warning(f"Parallel processing failed, falling back to sequential: {e}")
             for i, (start, end) in enumerate(segments):
-                segment_result = process_segment(i, start, end)
+                segment_result = _process_segment(args_dict, i, start, end, temp_dir)
                 if segment_result:
                     segment_results.append(segment_result)
         
@@ -1146,6 +1173,12 @@ def add_main_args_for_cli(parser: argparse.ArgumentParser) -> None:
         '--auto-optimize',
         action='store_true',
         help='Automatically configure optimal settings based on file size and system capabilities',
+    )
+    parser.add_argument(
+        '--segment-length',
+        type=int,
+        default=300,
+        help='Length of segments (in seconds) for memory-optimized processing',
     )
 
 

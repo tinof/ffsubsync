@@ -124,3 +124,54 @@ MIT licensed
 When working with very large video files (>10GB), you may encounter memory or performance issues. Here are some tips for optimizing the synchronization process:
 
 ### Use Memory-Optimized Mode
+
+This mode:
+- Processes the video in smaller segments
+- Reduces memory usage
+- Caches intermediate results
+- May be slower but more reliable for large files
+
+### Automatic Size-Based Optimization
+
+FFSubSync AE now automatically adapts its processing strategy based on file size:
+
+- **1-5GB files**: Standard processing with optimized memory usage
+- **5-20GB files**: Segment-based processing with checkpointing
+- **20-80GB files**: Selective processing of representative portions
+
+### Other Optimization Tips
+
+1. **Extract Audio First**: For very large files, extract the audio track first and use it as reference:
+   ```
+   ffmpeg -i large_video.mkv -vn -acodec pcm_s16le -ar 16000 -ac 1 audio.wav
+   ffsubsync audio.wav -i subtitles.srt -o synced.srt
+   ```
+
+2. **Use Specific Audio Stream**: If your video has multiple audio tracks, specify which one to use:
+   ```
+   ffsubsync --reference-stream 0:a:0 large_video.mkv -i subtitles.srt -o synced.srt
+   ```
+
+3. **Limit Processing Duration**: Process only a portion of the video:
+   ```
+   ffsubsync --start-seconds 0 --max-seconds 600 large_video.mkv -i subtitles.srt -o synced.srt
+   ```
+
+4. **Clean Cache**: Remove cached files if you encounter issues:
+   ```
+   rm -rf /path/to/video/directory/.ffsubsync_cache
+   ```
+
+5. **Low-Resource Systems**: For systems with limited RAM (<4GB):
+   ```
+   ffsubsync --memory-optimized --vad=auditok --no-fix-framerate large_video.mkv -i subtitles.srt -o synced.srt
+   ```
+
+### Technical Details
+
+The optimizations include:
+- Segment-based processing to reduce memory footprint
+- Disk caching of intermediate results
+- Optimized FFmpeg commands with thread control
+- Automatic resource limiting to prevent crashes
+- Checkpoint system for resumable processing

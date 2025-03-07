@@ -517,18 +517,26 @@ class VideoSpeechTransformer(TransformerMixin):
                         if current_time - last_update_time > update_interval:
                             if total_duration is not None:
                                 progress_pct = min(100, simple_progress * 100.0 / total_duration)
-                                logger.info(f"Extraction progress: {progress_pct:.1f}% ({simple_progress:.1f}/{total_duration:.1f}s)")
+                                logger.debug(f"Extraction progress: {progress_pct:.1f}% ({simple_progress:.1f}/{total_duration:.1f}s)")
                             else:
-                                logger.info(f"Extraction progress: {simple_progress:.1f}s")
+                                logger.debug(f"Extraction progress: {simple_progress:.1f}s")
                             last_update_time = current_time
                         
                         if "silero" not in self.vad:
                             in_bytes = np.frombuffer(in_bytes, np.uint8)
-                        media_bstring.append(detector(in_bytes))
+                            media_bstring.append(detector(in_bytes))
+                        else:
+                            # Silero processing needs to be in smaller chunks
+                            for i in range(0, len(in_bytes), frames_per_window):
+                                chunk = in_bytes[i:i + frames_per_window]
+                                if len(chunk) == frames_per_window:  # Only process complete chunks
+                                    media_bstring.append(detector(chunk))
                     except Exception as e:
-                        logger.warning(f"Error processing audio data: {e}")
-                        # Small pause to prevent CPU spinning on errors
-                        time.sleep(0.1)
+                        logger.error(f"Error during extraction: {e}")
+                        break
+            except Exception as e:
+                logger.error(f"Error in extraction loop: {e}")
+                raise
             finally:
                 # Clean up process if still running
                 if process.poll() is None:
@@ -537,22 +545,32 @@ class VideoSpeechTransformer(TransformerMixin):
                     if process.poll() is None:
                         process.kill()
         else:
-            # In main process, use Rich progress display
-            progress = ProgressReporter.create_progress_display(
-                "[progress.description]{task.description}", 
-                "[progress.percentage]{task.percentage:>3.0f}%", 
-                "Processed: {task.completed:.2f}/{task.total:.2f}"
-            )
-            
-            with progress:
-                task = progress.add_task("Extracting speech", total=total_duration if total_duration is not None else 0)
-                
-                try:
+            # For main process, create a proper progress display
+            try:
+                # Create a dedicated progress display
+                Progress = ProgressReporter.get_progress_class()
+                with Progress(
+                    "[progress.description]{task.description}",
+                    "[progress.percentage]{task.percentage:>3.0f}%",
+                    "{task.completed:.1f}/{task.total:.1f}s",
+                    transient=False
+                ) as progress:
+                    # Add task for speech extraction
+                    task_id = progress.add_task(
+                        "Extracting speech", 
+                        total=total_duration if total_duration is not None else 100.0,
+                        completed=0.0
+                    )
+                    
+                    # Processing loop with progress updates
+                    last_update_time = time.time()
+                    update_interval = 0.5  # Update every 0.5 seconds for smoother progress
+                    
                     while True:
-                        # Check if process is still running
+                        # Check if process ended
                         if process.poll() is not None:
                             break
-                            
+                        
                         # Check timeout
                         if time.time() - start_time > max_process_time:
                             logger.warning("FFmpeg processing timeout exceeded, terminating")
@@ -563,30 +581,48 @@ class VideoSpeechTransformer(TransformerMixin):
                             raise TimeoutError("FFmpeg processing took too long")
                         
                         try:
+                            # Read from ffmpeg
                             in_bytes = process.stdout.read(frames_per_window * windows_per_buffer)
                             if not in_bytes:
                                 break
-                                
-                            newstuff = len(in_bytes) / float(bytes_per_frame) / self.frame_rate
-                            if total_duration is not None and simple_progress + newstuff > total_duration:
-                                newstuff = total_duration - simple_progress
-                            simple_progress += newstuff
-                            progress.update(task, advance=newstuff)
                             
+                            # Calculate progress
+                            newstuff = len(in_bytes) / float(bytes_per_frame) / self.frame_rate
+                            simple_progress += newstuff
+                            
+                            # Update progress bar regularly
+                            current_time = time.time()
+                            if current_time - last_update_time > update_interval:
+                                progress.update(task_id, completed=simple_progress)
+                                last_update_time = current_time
+                            
+                            # Process audio data
                             if "silero" not in self.vad:
                                 in_bytes = np.frombuffer(in_bytes, np.uint8)
-                            media_bstring.append(detector(in_bytes))
+                                media_bstring.append(detector(in_bytes))
+                            else:
+                                # Silero processing needs to be in smaller chunks
+                                for i in range(0, len(in_bytes), frames_per_window):
+                                    chunk = in_bytes[i:i + frames_per_window]
+                                    if len(chunk) == frames_per_window:  # Only process complete chunks
+                                        media_bstring.append(detector(chunk))
                         except Exception as e:
-                            logger.warning(f"Error processing audio data: {e}")
-                            time.sleep(0.1)
-                finally:
-                    # Clean up process if still running
-                    if process.poll() is None:
-                        process.terminate()
-                        time.sleep(0.1)
-                        if process.poll() is None:
-                            process.kill()
+                            logger.error(f"Error during extraction: {e}")
+                            break
                             
+                    # Final progress update
+                    progress.update(task_id, completed=simple_progress)
+            except Exception as e:
+                logger.error(f"Error in progress display: {e}")
+                raise
+            finally:
+                # Clean up process if still running
+                if process.poll() is None:
+                    process.terminate()
+                    time.sleep(0.1)
+                    if process.poll() is None:
+                        process.kill()
+            
         # Don't wait for process if already terminated
         if process.poll() is None:
             process.wait()

@@ -47,47 +47,31 @@ from ffsubsync.version import get_version
 
 # Create shared helpers for progress reporting
 class ProgressReporter:
-    """Shared utility for handling progress reporting that works in both main and worker processes
+    """Handles progress reporting with correct behavior in both main and worker processes"""
     
-    Rich has a fundamental limitation: only one live display can be active per process.
-    When using multiprocessing, if each worker tries to create a Rich progress display,
-    we get the error "Only one live display may be active at once".
-    
-    This class provides a solution by:
-    1. Detecting whether we're in a worker process or main process
-    2. Using real Rich displays only in the main process
-    3. Using dummy progress displays in worker processes that maintain the same API
-    
-    This approach ensures we get proper progress reporting without conflicts.
-    """
+    # Use a class variable to track if we're in a worker process
+    _is_worker_process = None
     
     @staticmethod
     def is_worker_process():
-        """Detect if we're in a worker process"""
-        # First try process title
-        try:
-            import setproctitle
-            current_proc_title = setproctitle.getproctitle()
-            if current_proc_title.startswith('ffsubsync-seg'):
-                return True
-        except ImportError:
-            pass
-            
-        # Then try multiprocessing API
-        return multiprocessing.current_process().name != 'MainProcess'
+        """Check if we're running in a worker process
+        
+        This method caches the result to avoid repeated checks.
+        """
+        if ProgressReporter._is_worker_process is None:
+            import multiprocessing
+            ProgressReporter._is_worker_process = multiprocessing.current_process().name != 'MainProcess'
+        return ProgressReporter._is_worker_process
     
     @staticmethod
     def get_progress_class():
-        """Return appropriate progress class based on context
+        """Get the appropriate Progress class based on context
         
-        Returns a dummy progress class in worker processes to avoid conflicts with
-        Rich's limitation of only one live display per process.
+        In worker processes, return a dummy class that maintains API compatibility.
+        In the main process, return the actual Rich Progress class.
         """
-        # In worker processes, return a dummy progress display
+        # In worker processes, use a dummy class for API compatibility
         if ProgressReporter.is_worker_process():
-            # DummyProgress is needed because worker processes cannot create
-            # Rich live displays without conflicting with the main process.
-            # This maintains the same API but doesn't actually display anything.
             class DummyProgress:
                 def __init__(self, *args, **kwargs):
                     pass
@@ -138,17 +122,28 @@ class ProgressReporter:
         Progress = ProgressReporter.get_progress_class()
         
         if not ProgressReporter.is_worker_process():
-            # In main process, potentially add console capture
+            # In main process, set up a dedicated console for progress
             try:
                 from rich.console import Console
-                # Create a progress display with a captured console if possible
-                console = Console()
-                return Progress(*args, console=console, **kwargs)
+                from rich.live import Live
+                
+                # Create a dedicated console for progress display to avoid conflicts with logging
+                console = Console(file=sys.stderr)
+                
+                # Use redirect_stdout and redirect_stderr to avoid log messages interrupting progress
+                if 'console' not in kwargs:
+                    kwargs['console'] = console
+                
+                # Set transient=False to keep the progress bar on screen
+                if 'transient' not in kwargs:
+                    kwargs['transient'] = False
+                    
+                return Progress(*args, **kwargs)
             except ImportError:
-                # Just use standard Rich progress if console module not available
+                # Fall back to basic progress
                 return Progress(*args, **kwargs)
         else:
-            # In worker process, use dummy progress
+            # In worker process, return dummy progress
             return Progress(*args, **kwargs)
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -920,7 +915,8 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
             progress = ProgressReporter.create_progress_display(
                 "[progress.description]{task.description}", 
                 "[progress.percentage]{task.percentage:>3.0f}%", 
-                "Processed: {task.completed}/{task.total}"
+                "Processed: {task.completed}/{task.total}",
+                transient=False  # Keep progress bar visible
             )
             
             logger.info("Processing segments in parallel")
@@ -985,7 +981,8 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
             progress = ProgressReporter.create_progress_display(
                 "[progress.description]{task.description}", 
                 "[progress.percentage]{task.percentage:>3.0f}%", 
-                "Processed: {task.completed}/{task.total}"
+                "Processed: {task.completed}/{task.total}",
+                transient=False  # Keep progress bar visible
             )
             
             with progress:

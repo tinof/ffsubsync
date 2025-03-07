@@ -12,7 +12,7 @@ try:
         level=logging.INFO,
         format="%(message)s",
         datefmt="[%X]",
-        handlers=[RichHandler(console=Console(file=sys.stderr))],
+        handlers=[RichHandler(console=Console(file=sys.stderr), show_time=True, show_path=False, markup=True)],
     )
 except:  # noqa: E722
     logging.basicConfig(stream=sys.stderr, level=logging.INFO)

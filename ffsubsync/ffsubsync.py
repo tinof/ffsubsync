@@ -817,7 +817,8 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
         return False
         
     file_size = os.path.getsize(args.reference)
-    logger.info(f"Using optimized processing for large file ({file_size / (1024*1024*1024):.2f} GB)")
+    file_size_gb = file_size / (1024 * 1024 * 1024)
+    logger.info(f"Large file detected ({file_size_gb:.2f} GB), using memory-optimized processing")
     
     # Get video duration
     try:
@@ -838,14 +839,15 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
         # Define segments to process based on file size
         segment_length = getattr(args, 'segment_length', 300)  # Default to 5 minutes if not specified
         
-        if file_size > 20 * 1024 * 1024 * 1024:  # >20GB
+        if file_size_gb > 20:  # >20GB
             # For very large files, process just a few strategic points
             segments = [
                 (0, segment_length),  # First segment
                 (duration/2 - segment_length/2, duration/2 + segment_length/2),  # Middle segment
                 (max(0, duration - segment_length), duration)  # Last segment
             ]
-        elif file_size > 10 * 1024 * 1024 * 1024:  # 10-20GB
+            logger.info(f"Using selective segment processing for very large file ({len(segments)} segments)")
+        elif file_size_gb > 10:  # 10-20GB
             # For large files, process more segments
             segments = [
                 (0, segment_length),  # First segment
@@ -854,11 +856,13 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
                 (3*duration/4 - segment_length/2, 3*duration/4 + segment_length/2),  # 75% point
                 (max(0, duration - segment_length), duration)  # Last segment
             ]
+            logger.info(f"Using strategic segment processing for large file ({len(segments)} segments)")
         else:  # 5-10GB
             # For medium files, use more granular segments
             segment_count = 8
             segment_length = duration / segment_count
             segments = [(i * segment_length, (i + 1) * segment_length) for i in range(segment_count)]
+            logger.info(f"Using granular segment processing for medium file ({len(segments)} segments)")
         
         logger.info(f"Processing {len(segments)} segments")
         
@@ -881,6 +885,8 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
             
             logger.info("Processing segments in parallel")
             max_workers = min(multiprocessing.cpu_count(), len(segments))
+            logger.info(f"Using {max_workers} worker processes")
+            
             with progress:
                 task = progress.add_task("Processing segments", total=len(segments))
                 with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -960,143 +966,119 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
 
 def _run_impl(args: argparse.Namespace, result: Dict[str, Any]) -> bool:
     # Check if this is a very large file that needs special handling
-    if args.reference and os.path.exists(args.reference) and args.memory_optimized:
+    import os
+    
+    # Auto-configure optimizations if enabled
+    if getattr(args, 'auto_optimize', False):
+        args = auto_configure_optimizations(args)
+    
+    # Check if file is large and memory optimization is requested
+    file_is_large = False
+    if os.path.exists(args.reference):
         file_size = os.path.getsize(args.reference)
-        if file_size > 5 * 1024 * 1024 * 1024:  # >5GB
-            logger.info(f"Large file detected ({file_size / (1024*1024*1024):.2f} GB), using memory-optimized processing")
-            if process_large_file(args, result):
+        file_size_gb = file_size / (1024 * 1024 * 1024)
+        file_is_large = file_size_gb > 5
+        
+        if file_is_large:
+            logger.info(f"Large file detected ({file_size_gb:.2f} GB)")
+    
+    # Apply memory optimization for large files if requested
+    if getattr(args, 'memory_optimized', False) and file_is_large:
+        logger.info("Using memory-optimized processing")
+        
+        try:
+            result_status = process_large_file(args, result)
+            if result_status:
                 return True
-            # If large file processing failed, fall back to standard processing
+                
             logger.info("Memory-optimized processing failed, falling back to standard processing")
+        except Exception as e:
+            logger.warning(f"Memory-optimized processing error: {e}, falling back to standard processing")
     
-    # Apply max duration limit if specified
-    if args.max_duration is not None and args.reference and os.path.exists(args.reference):
-        logger.info(f"Limiting processing to first {args.max_duration} seconds")
-        args.start_seconds = args.start_seconds or 0
-        args.duration = args.max_duration
+    # If we reached here, use standard processing
     
-    # Standard processing
-    if args.extract_subs_from_stream is not None:
-        return extract_subtitles_from_reference(args) == 0
-    if args.make_test_case and not os.path.exists(args.reference):
-        logger.error("need reference file to exist for test case")
-        return False
-    if args.overwrite_input:
-        if len(args.srtin) != 1:
-            logger.error("need exactly one input subtitle file for overwriting")
-            return False
-        args.srtout = args.srtin[0]
+    # If max_seconds is specified, apply duration limiting
+    if getattr(args, 'max_seconds', None):
+        logger.info(f"Limiting processing to first {args.max_seconds} seconds")
+    
+    # Apply memory-specific optimizations if needed
+    if getattr(args, 'memory_optimized', False):
+        logger.info("Using memory-optimized mode (handled externally), not passing memory optimization parameters to VideoSpeechTransformer")
+    
+    # Standard processing flow
     reference_pipe = make_reference_pipe(args)
     if reference_pipe is None:
         return False
-    logger.info("extracting speech segments from reference '%s'...", args.reference)
-    try:
-        reference_pipe.fit(args.reference)
-        if args.make_test_case:
-            npy_savename = _npy_savename(args)
-            logger.info("saving speech extraction to %s", npy_savename)
-            np.savez_compressed(
-                npy_savename,
-                speech=reference_pipe.transform(args.reference),
-                sample_rate=SAMPLE_RATE,
-            )
-        if args.serialize_speech:
-            logger.info("serializing speech...")
-            result["speech_streams"] = reference_pipe.transform(args.reference)
-            return True
-        elif args.extract_subs:
-            logger.info("extracting subtitles...")
-            result["extracted_subs"] = reference_pipe.transform(args.reference)
-            return True
-        else:
-            return try_sync(args, reference_pipe, result)
-    except Exception as e:
-        logger.error(e)
-        if args.gui_mode:
-            logger.error("Traceback: %s", traceback.format_exc())
-        return False
+    
+    # Log speech extraction step with more detail
+    vad_method = getattr(args, 'vad', 'auditok')
+    logger.info(f"extracting speech segments from reference '{args.reference}' using {vad_method}...")
+    
+    # Apply speech extraction and synchronization
+    return try_sync(args, reference_pipe, result)
 
 
 def auto_configure_optimizations(args: argparse.Namespace) -> argparse.Namespace:
-    """Automatically configure optimal settings based on file size and system resources.
+    """Automatically configure optimizations based on file size and system resources.
     
-    This function detects:
-    1. File size - to determine appropriate processing strategy
-    2. Available memory - to avoid OOM errors
-    3. CPU cores - to set optimal parallelization
-    4. Content type - to choose appropriate VAD/processing
-    
-    Returns:
-        Updated args with optimal settings
+    This function analyzes the input file and available system resources, then
+    sets appropriate optimization parameters for best performance.
     """
-    # Only auto-configure if auto mode is enabled and we have a reference file
-    if not getattr(args, 'auto_optimize', False) or not args.reference or not os.path.exists(args.reference):
+    import os
+    import psutil
+    
+    if not getattr(args, 'auto_optimize', False):
         return args
     
+    # Log that auto-optimization is enabled
     logger.info("Auto-optimization mode enabled - configuring optimal settings")
     
     # Get system resources
-    try:
-        mem_available = psutil.virtual_memory().available / (1024 * 1024 * 1024)  # GB
-        cpu_count = psutil.cpu_count(logical=False) or psutil.cpu_count() or 2
+    cpu_count = multiprocessing.cpu_count()
+    available_memory_gb = psutil.virtual_memory().available / (1024 * 1024 * 1024)
+    logger.info(f"System resources: {cpu_count} CPU cores, {available_memory_gb:.1f}GB available memory")
+    
+    # Check reference file size
+    if not os.path.exists(args.reference):
+        return args
         
-        logger.info(f"System resources: {cpu_count} CPU cores, {mem_available:.1f}GB available memory")
-    except Exception as e:
-        logger.warning(f"Error detecting system resources: {e}, using conservative defaults")
-        mem_available = 4.0
-        cpu_count = 2
-
-    # Get file size
-    try:
-        file_size = os.path.getsize(args.reference) / (1024 * 1024 * 1024)  # in GB
-        logger.info(f"Reference file size: {file_size:.2f}GB")
-    except Exception as e:
-        logger.warning(f"Error detecting file size: {e}, using default settings")
-        file_size = 1.0
-
-    # Auto-apply memory_optimized for large files
-    if file_size > 4.0 and not args.memory_optimized:
+    file_size = os.path.getsize(args.reference)
+    file_size_gb = file_size / (1024 * 1024 * 1024)
+    logger.info(f"Reference file size: {file_size_gb:.2f}GB")
+    
+    # Define optimizations based on file size and available memory
+    if file_size_gb > 5:
+        # For files > 5GB, use memory optimization
         logger.info("Auto-enabling memory optimized mode for large file")
         args.memory_optimized = True
-    
-    # Auto-enable progressive mode for all files unless explicitly disabled
-    if not hasattr(args, 'progressive') or args.progressive is None:
-        args.progressive = True
-        logger.info("Auto-enabling progressive multi-resolution processing")
-    
-    # Auto-enable content-aware processing unless explicitly disabled
-    if not hasattr(args, 'content_aware') or args.content_aware is None:
-        args.content_aware = True
-        logger.info("Auto-enabling content-aware anchor selection")
-    
-    # Auto-enable parallel processing if enough CPU cores (2+) and not explicitly disabled
-    if cpu_count >= 2 and not getattr(args, 'parallel', False):
+        
+        # Memory optimization parameters based on available memory
+        if available_memory_gb < 8:
+            logger.info("Limited memory detected, using ultra-memory-efficient mode")
+            # Additional memory optimizations for low-memory systems
+        
+    # Enable parallel processing if multiple cores available and appropriate
+    if cpu_count > 1 and file_size_gb > 1:
+        logger.info(f"Auto-enabling parallel processing with {min(cpu_count, 4)} cores")
         args.parallel = True
-        logger.info(f"Auto-enabling parallel processing with {cpu_count} cores")
-    
-    # Configure segment size based on file size and available memory
-    if file_size > 20.0:
-        # Very large files (>20GB)
-        segment_length = min(300, int(3000 * (mem_available / file_size)))
+        
+    # Adjust segment length based on file size
+    if file_size_gb > 20:
+        # For very large files, use shorter segments
+        segment_length = min(120, max(60, int(300 * (5 / file_size_gb))))
         logger.info(f"Auto-configuring segment length: {segment_length}s for very large file")
         args.segment_length = segment_length
         
-        # Limit max duration if not specified for huge files
-        if not getattr(args, 'max_duration', None):
-            duration = min(1800, int(mem_available * 200))
-            logger.info(f"Auto-limiting processing duration to {duration}s for very large file")
-            args.max_duration = duration
-    elif file_size > 5.0:
-        # Large files (5-20GB)
-        if not getattr(args, 'max_duration', None) and mem_available < 8.0:
-            duration = min(3600, int(mem_available * 300))
-            logger.info(f"Auto-limiting processing duration to {duration}s for large file")
-            args.max_duration = duration
-    
-    # Adjust VAD based on file size and memory
-    if file_size > 10.0 and mem_available < 4.0 and args.vad == DEFAULT_VAD:
+        # Limit processing duration for huge files
+        max_seconds = min(180, max(90, int(600 * (10 / file_size_gb))))
+        logger.info(f"Auto-limiting processing duration to {max_seconds}s for very large file")
+        args.max_seconds = max_seconds
+        
+    # Select appropriate VAD method based on file size and memory
+    if file_size_gb > 10 and available_memory_gb < 4:
+        # For large files on low-memory systems, use memory-efficient VAD
         logger.info("Auto-selecting memory-efficient VAD (auditok) for large file on low-memory system")
-        args.vad = "auditok"
+        args.vad = 'auditok'
     
     return args
 

@@ -399,9 +399,18 @@ class VideoSpeechTransformer(TransformerMixin):
                 )
                 - self.start_seconds
             )
+            logger.info(f"Video total duration: {total_duration:.2f} seconds")
+            
+            # Log processing range
+            if self.start_seconds > 0:
+                logger.info(f"Starting processing at {self.start_seconds:.2f} seconds")
+                
+            # Log VAD method being used
+            logger.info(f"Using VAD method: {self.vad}")
         except Exception as e:
             logger.warning(e)
             total_duration = None
+        
         if "webrtc" in self.vad:
             detector = _make_webrtcvad_detector(
                 self.sample_rate, self.frame_rate, self._non_speech_label

@@ -456,7 +456,20 @@ class VideoSpeechTransformer(TransformerMixin):
             "-ar", str(self.frame_rate),
             "-"
         ])
+        
+        # Log that we're starting ffmpeg
+        logger.info(f"Starting ffmpeg processing for speech extraction...")
+        
+        # Add a timeout mechanism for ffmpeg to prevent hanging
+        import time
+        import signal
+        
+        start_time = time.time()
+        max_process_time = 600  # 10 minutes max for a segment
+        
+        # Create process with appropriate timeouts
         process = subprocess.Popen(ffmpeg_args, **subprocess_args(include_stdout=True))
+        
         bytes_per_frame = 2
         frames_per_window = bytes_per_frame * self.frame_rate // self.sample_rate
         windows_per_buffer = 1000
@@ -465,8 +478,66 @@ class VideoSpeechTransformer(TransformerMixin):
         # Import ProgressReporter to get the appropriate progress display
         from ffsubsync.ffsubsync import ProgressReporter
         
-        if not self.vlc_mode:
-            # Create optimized progress display for current context
+        # Check if we're in a worker process
+        is_worker = ProgressReporter.is_worker_process()
+        
+        # For worker processes, use simpler progress reporting approach
+        if is_worker:
+            try:
+                # Processing loop with timeouts and periodic updates
+                last_update_time = time.time()
+                update_interval = 2.0  # Update every 2 seconds
+                
+                while True:
+                    # Set a timeout for reading from ffmpeg
+                    if process.poll() is not None:
+                        # Process ended
+                        break
+                    
+                    # Check overall timeout
+                    if time.time() - start_time > max_process_time:
+                        logger.warning("FFmpeg processing timeout exceeded, terminating")
+                        process.terminate()
+                        time.sleep(0.5)
+                        if process.poll() is None:
+                            process.kill()
+                        raise TimeoutError("FFmpeg processing took too long")
+                    
+                    try:
+                        # Try to read with a timeout
+                        in_bytes = process.stdout.read(frames_per_window * windows_per_buffer)
+                        if not in_bytes:
+                            break
+                        
+                        newstuff = len(in_bytes) / float(bytes_per_frame) / self.frame_rate
+                        simple_progress += newstuff
+                        
+                        # Provide periodic progress updates through logger
+                        current_time = time.time()
+                        if current_time - last_update_time > update_interval:
+                            if total_duration is not None:
+                                progress_pct = min(100, simple_progress * 100.0 / total_duration)
+                                logger.info(f"Extraction progress: {progress_pct:.1f}% ({simple_progress:.1f}/{total_duration:.1f}s)")
+                            else:
+                                logger.info(f"Extraction progress: {simple_progress:.1f}s")
+                            last_update_time = current_time
+                        
+                        if "silero" not in self.vad:
+                            in_bytes = np.frombuffer(in_bytes, np.uint8)
+                        media_bstring.append(detector(in_bytes))
+                    except Exception as e:
+                        logger.warning(f"Error processing audio data: {e}")
+                        # Small pause to prevent CPU spinning on errors
+                        time.sleep(0.1)
+            finally:
+                # Clean up process if still running
+                if process.poll() is None:
+                    process.terminate()
+                    time.sleep(0.1)
+                    if process.poll() is None:
+                        process.kill()
+        else:
+            # In main process, use Rich progress display
             progress = ProgressReporter.create_progress_display(
                 "[progress.description]{task.description}", 
                 "[progress.percentage]{task.percentage:>3.0f}%", 
@@ -475,39 +546,60 @@ class VideoSpeechTransformer(TransformerMixin):
             
             with progress:
                 task = progress.add_task("Extracting speech", total=total_duration if total_duration is not None else 0)
-                while True:
-                    in_bytes = process.stdout.read(frames_per_window * windows_per_buffer)
-                    if not in_bytes:
-                        break
-                    newstuff = len(in_bytes) / float(bytes_per_frame) / self.frame_rate
-                    if total_duration is not None and simple_progress + newstuff > total_duration:
-                        newstuff = total_duration - simple_progress
-                    simple_progress += newstuff
-                    progress.update(task, advance=newstuff)
-                    if "silero" not in self.vad:
-                        in_bytes = np.frombuffer(in_bytes, np.uint8)
-                    media_bstring.append(detector(in_bytes))
-        else:
-            while True:
-                in_bytes = process.stdout.read(frames_per_window * windows_per_buffer)
-                if not in_bytes:
-                    break
-                newstuff = len(in_bytes) / float(bytes_per_frame) / self.frame_rate
-                simple_progress += newstuff
-                if total_duration is not None:
-                    print(f"{int(simple_progress * 100.0 / total_duration)}")
-                    sys.stdout.flush()
-                if "silero" not in self.vad:
-                    in_bytes = np.frombuffer(in_bytes, np.uint8)
-                media_bstring.append(detector(in_bytes))
-        process.wait()
+                
+                try:
+                    while True:
+                        # Check if process is still running
+                        if process.poll() is not None:
+                            break
+                            
+                        # Check timeout
+                        if time.time() - start_time > max_process_time:
+                            logger.warning("FFmpeg processing timeout exceeded, terminating")
+                            process.terminate()
+                            time.sleep(0.5)
+                            if process.poll() is None:
+                                process.kill()
+                            raise TimeoutError("FFmpeg processing took too long")
+                        
+                        try:
+                            in_bytes = process.stdout.read(frames_per_window * windows_per_buffer)
+                            if not in_bytes:
+                                break
+                                
+                            newstuff = len(in_bytes) / float(bytes_per_frame) / self.frame_rate
+                            if total_duration is not None and simple_progress + newstuff > total_duration:
+                                newstuff = total_duration - simple_progress
+                            simple_progress += newstuff
+                            progress.update(task, advance=newstuff)
+                            
+                            if "silero" not in self.vad:
+                                in_bytes = np.frombuffer(in_bytes, np.uint8)
+                            media_bstring.append(detector(in_bytes))
+                        except Exception as e:
+                            logger.warning(f"Error processing audio data: {e}")
+                            time.sleep(0.1)
+                finally:
+                    # Clean up process if still running
+                    if process.poll() is None:
+                        process.terminate()
+                        time.sleep(0.1)
+                        if process.poll() is None:
+                            process.kill()
+                            
+        # Don't wait for process if already terminated
+        if process.poll() is None:
+            process.wait()
+            
+        logger.info(f"FFmpeg processing complete. Processed {simple_progress:.2f} seconds.")
+            
         if len(media_bstring) == 0:
             raise ValueError(
                 "Unable to detect speech. "
                 "Perhaps try specifying a different stream / track, or a different vad."
             )
         self.video_speech_results_ = np.concatenate(media_bstring)
-        logger.info("total of speech segments: %s", np.sum(self.video_speech_results_))
+        logger.info("Total of speech segments: %s", np.sum(self.video_speech_results_))
         return self
 
     def transform(self, *_) -> np.ndarray:

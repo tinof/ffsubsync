@@ -332,7 +332,7 @@ def try_sync(
                 # Process framerate ratios in parallel if enabled
                 if getattr(args, 'parallel', False) and len(srt_pipes) > 1:
                     try:
-                        from concurrent.futures import ProcessPoolExecutor, as_completed
+                        from concurrent.futures import ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
                         
                         logger.info(f"Testing {len(srt_pipes)} framerate ratios in parallel")
                         max_workers = min(multiprocessing.cpu_count(), len(srt_pipes))
@@ -746,6 +746,10 @@ def _process_segment(args_dict, segment_idx, start, end, temp_dir):
     segment_args.max_seconds = end - start
     segment_args.memory_optimized = False  # Avoid recursive optimization
     
+    # Set timeout for segment processing
+    start_time = time.time()
+    max_segment_time = 900  # 15 minutes maximum per segment
+    
     # Modify process title to help identify in logs
     try:
         import setproctitle
@@ -761,15 +765,46 @@ def _process_segment(args_dict, segment_idx, start, end, temp_dir):
     segment_output = os.path.join(temp_dir, f"segment_{segment_idx}.npz")
     
     try:
+        # Periodic status updates
+        last_status_time = time.time()
+        status_interval = 30.0  # Every 30 seconds
+        
         # Extract speech from this segment
         reference_pipe = make_reference_pipe(segment_args)
         if reference_pipe is None:
             return None
             
+        # Log status periodically during processing
+        def check_timeout():
+            nonlocal last_status_time
+            current_time = time.time()
+            
+            # Check for timeout
+            if current_time - start_time > max_segment_time:
+                logger.warning(f"{segment_prefix}Processing timeout exceeded (>{max_segment_time}s), aborting")
+                raise TimeoutError(f"Segment processing timeout exceeded")
+                
+            # Provide periodic status updates
+            if current_time - last_status_time > status_interval:
+                elapsed = current_time - start_time
+                logger.info(f"{segment_prefix}Still processing ({elapsed:.1f}s elapsed)")
+                last_status_time = current_time
+                
+        # Begin fitting the pipeline
+        logger.info(f"{segment_prefix}Fitting speech extraction pipeline")
+        check_timeout()
         reference_pipe.fit(segment_args.reference)
+        
+        # Transform to extract speech data
+        logger.info(f"{segment_prefix}Transforming audio to speech data")
+        check_timeout()
         speech = reference_pipe.transform(segment_args.reference)
         
+        # Check timeout again
+        check_timeout()
+        
         # Save speech data for this segment
+        logger.info(f"{segment_prefix}Saving extracted speech data")
         np.savez_compressed(
             segment_output,
             speech=speech,
@@ -782,7 +817,9 @@ def _process_segment(args_dict, segment_idx, start, end, temp_dir):
         speech_activity = np.mean(speech)
         speech_transitions = np.sum(np.abs(np.diff(speech)))
         
-        logger.info(f"{segment_prefix}Processing complete - speech activity: {speech_activity:.3f}, transitions: {speech_transitions:.0f}")
+        # Log processing time
+        total_time = time.time() - start_time
+        logger.info(f"{segment_prefix}Processing complete in {total_time:.1f}s - speech activity: {speech_activity:.3f}, transitions: {speech_transitions:.0f}")
         
         return {
             'idx': segment_idx,
@@ -793,7 +830,9 @@ def _process_segment(args_dict, segment_idx, start, end, temp_dir):
             'output_path': segment_output
         }
     except Exception as e:
-        logger.warning(f"{segment_prefix}Failed: {e}")
+        # Calculate how long we ran before failing
+        elapsed = time.time() - start_time
+        logger.warning(f"{segment_prefix}Failed after {elapsed:.1f}s: {e}")
         
         return None
 
@@ -874,7 +913,8 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
         try:
             # Try parallel processing
             import multiprocessing
-            from concurrent.futures import ProcessPoolExecutor, as_completed
+            from concurrent.futures import ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
+            import time
             
             # Create optimized progress display
             progress = ProgressReporter.create_progress_display(
@@ -887,22 +927,57 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
             max_workers = min(multiprocessing.cpu_count(), len(segments))
             logger.info(f"Using {max_workers} worker processes")
             
+            # Track each segment's start time
+            segment_start_times = {}
+            last_status_time = time.time()
+            status_interval = 10.0  # Log status every 10 seconds
+            
             with progress:
                 task = progress.add_task("Processing segments", total=len(segments))
                 with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                    futures = [
-                        executor.submit(_process_segment, args_dict, i, start, end, temp_dir) 
-                        for i, (start, end) in enumerate(segments)
-                    ]
-
-                    for future in as_completed(futures):
-                        try:
-                            segment_result = future.result()
-                            if segment_result:
-                                segment_results.append(segment_result)
-                        except Exception as e:
-                            logger.warning(f"Error in parallel segment processing: {e}")
-                        progress.update(task, advance=1)
+                    # Submit all jobs
+                    futures = {}
+                    for i, (start, end) in enumerate(segments):
+                        future = executor.submit(_process_segment, args_dict, i, start, end, temp_dir)
+                        futures[future] = i
+                        segment_start_times[i] = time.time()
+                        logger.info(f"Submitted segment {i} for processing")
+                    
+                    # Monitor progress
+                    completed = 0
+                    while completed < len(segments):
+                        # Check for completed futures
+                        done, not_done = wait(list(futures.keys()), timeout=2.0, return_when=FIRST_COMPLETED)
+                        
+                        # Process any completed futures
+                        for future in done:
+                            segment_idx = futures.pop(future)
+                            try:
+                                segment_result = future.result()
+                                processing_time = time.time() - segment_start_times[segment_idx]
+                                if segment_result:
+                                    logger.info(f"Segment {segment_idx} completed in {processing_time:.1f}s")
+                                    segment_results.append(segment_result)
+                                else:
+                                    logger.warning(f"Segment {segment_idx} failed after {processing_time:.1f}s")
+                            except Exception as e:
+                                logger.warning(f"Error in segment {segment_idx}: {e}")
+                            
+                            # Update progress
+                            completed += 1
+                            progress.update(task, completed=completed)
+                        
+                        # Provide periodic status updates for running segments
+                        current_time = time.time()
+                        if current_time - last_status_time > status_interval:
+                            for future, idx in futures.items():
+                                elapsed = current_time - segment_start_times[idx]
+                                logger.info(f"Segment {idx} still processing ({elapsed:.1f}s elapsed)")
+                            last_status_time = current_time
+                            
+                        # Don't burn CPU if nothing completed
+                        if not done:
+                            time.sleep(0.5)
         except (ImportError, Exception) as e:
             logger.warning(f"Parallel processing failed, falling back to sequential: {e}")
             
@@ -916,9 +991,17 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
             with progress:
                 task = progress.add_task("Processing segments sequentially", total=len(segments))
                 for i, (start, end) in enumerate(segments):
+                    logger.info(f"Starting sequential processing of segment {i}")
+                    start_time = time.time()
                     segment_result = _process_segment(args_dict, i, start, end, temp_dir)
+                    elapsed = time.time() - start_time
+                    
                     if (segment_result):
+                        logger.info(f"Segment {i} completed in {elapsed:.1f}s")
                         segment_results.append(segment_result)
+                    else:
+                        logger.warning(f"Segment {i} failed after {elapsed:.1f}s")
+                        
                     progress.update(task, advance=1)
         
         # If we have at least one successful segment, use it for synchronization

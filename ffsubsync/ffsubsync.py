@@ -776,41 +776,35 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
             # Try parallel processing
             import multiprocessing
             from concurrent.futures import ProcessPoolExecutor, as_completed
-            import tqdm
-            
+            from rich.progress import Progress
             logger.info("Processing segments in parallel")
             max_workers = min(multiprocessing.cpu_count(), len(segments))
-            
-            # Create a master progress bar for overall progress
-            with tqdm.tqdm(total=len(segments), desc="Segments", unit="seg") as pbar:
+            with Progress("[progress.description]{task.description}", "[progress.percentage]{task.percentage:>3.0f}%", "Processed: {task.completed}/{task.total}") as progress:
+                task = progress.add_task("Processing segments", total=len(segments))
                 with ProcessPoolExecutor(max_workers=max_workers) as executor:
                     futures = [
                         executor.submit(_process_segment, args_dict, i, start, end, temp_dir) 
                         for i, (start, end) in enumerate(segments)
                     ]
-                    
+
                     for future in as_completed(futures):
                         try:
                             segment_result = future.result()
                             if segment_result:
                                 segment_results.append(segment_result)
-                            pbar.update(1)
                         except Exception as e:
                             logger.warning(f"Error in parallel segment processing: {e}")
-                            pbar.update(1)
-                        
+                        progress.update(task, advance=1)
         except (ImportError, Exception) as e:
-            # Fall back to sequential processing
             logger.warning(f"Parallel processing failed, falling back to sequential: {e}")
-            import tqdm
-            
-            # Create a master progress bar for sequential processing
-            with tqdm.tqdm(total=len(segments), desc="Segments", unit="seg") as pbar:
+            from rich.progress import Progress
+            with Progress("[progress.description]{task.description}", "[progress.percentage]{task.percentage:>3.0f}%", "Processed: {task.completed}/{task.total}") as progress:
+                task = progress.add_task("Processing segments sequentially", total=len(segments))
                 for i, (start, end) in enumerate(segments):
                     segment_result = _process_segment(args_dict, i, start, end, temp_dir)
-                    if segment_result:
+                    if (segment_result):
                         segment_results.append(segment_result)
-                    pbar.update(1)
+                    progress.update(task, advance=1)
         
         # If we have at least one successful segment, use it for synchronization
         if not segment_results:

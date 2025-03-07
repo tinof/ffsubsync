@@ -658,7 +658,10 @@ def _process_segment(args_dict, segment_idx, start, end, temp_dir):
         # Disable tqdm progress bars in worker processes to avoid interleaved output
         import tqdm
         original_tqdm = tqdm.tqdm
-        tqdm.tqdm = lambda *args, **kwargs: original_tqdm(*args, **kwargs, disable=True)
+        def patched_tqdm(*args, **kwargs):
+            kwargs['disable'] = True
+            return original_tqdm(*args, **kwargs)
+        tqdm.tqdm = patched_tqdm
         
         # Extract speech from this segment
         reference_pipe = make_reference_pipe(segment_args)

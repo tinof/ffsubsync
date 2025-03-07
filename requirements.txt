@@ -9,7 +9,6 @@ rich>=10.0.0
 setuptools>=65.0.0
 six
 srt>=3.0.0
-tqdm
 typing_extensions
 webrtcvad
 scipy>=1.7.0

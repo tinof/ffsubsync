@@ -7,3 +7,4 @@ dist
 __version__
 .venv/
 .coverage
+/docs/rich-readthedocs-io-en-latest.txt

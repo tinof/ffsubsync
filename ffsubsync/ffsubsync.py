@@ -144,6 +144,23 @@ def calculate_morphed_score(ref_speech: np.ndarray, morphed_speech: np.ndarray) 
     return FFTAligner().fit_transform(ref_speech, morphed_speech, get_score=True)[0]
 
 
+def _test_framerate_ratio(ratio_pipe, srtin, reference_speech, max_offset_seconds):
+    try:
+        # Extract speech from subtitle with this framerate ratio
+        sub_speech = ratio_pipe.transform(srtin)
+        # Try global alignment first
+        fft_aligner = FFTAligner(
+            max_offset_samples=int(max_offset_seconds * SAMPLE_RATE),
+            use_progressive=True
+        )
+        fft_aligner.fit(reference_speech, sub_speech)
+        score, offset = fft_aligner.best_score_, fft_aligner.best_offset_
+        return (score, offset), ratio_pipe
+    except Exception as e:
+        logger.warning(f"Error testing framerate ratio: {e}")
+        return (float('-inf'), 0), ratio_pipe
+
+
 def try_sync(
     args: argparse.Namespace, reference_pipe: Optional[Pipeline], result: Dict[str, Any]
 ) -> bool:
@@ -207,25 +224,6 @@ def try_sync(
                 best_srt_pipe = srt_pipes[0]  # Initialize with first pipe
                 offset_samples = 0
                 
-                # Function to test a single framerate ratio
-                def test_framerate_ratio(ratio_pipe):
-                    try:
-                        # Extract speech from subtitle with this framerate ratio
-                        sub_speech = ratio_pipe.transform(srtin)
-                        
-                        # Try global alignment first
-                        fft_aligner = FFTAligner(
-                            max_offset_samples=int(args.max_offset_seconds * SAMPLE_RATE),
-                            use_progressive=True
-                        )
-                        fft_aligner.fit(reference_speech, sub_speech)
-                        score, offset = fft_aligner.best_score_, fft_aligner.best_offset_
-                        
-                        return (score, offset), ratio_pipe
-                    except Exception as e:
-                        logger.warning(f"Error testing framerate ratio: {e}")
-                        return (float('-inf'), 0), ratio_pipe
-                
                 # Process framerate ratios in parallel if enabled
                 if getattr(args, 'parallel', False) and len(srt_pipes) > 1:
                     try:
@@ -235,7 +233,7 @@ def try_sync(
                         max_workers = min(multiprocessing.cpu_count(), len(srt_pipes))
                         
                         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                            futures = [executor.submit(test_framerate_ratio, pipe) for pipe in srt_pipes]
+                            futures = [executor.submit(_test_framerate_ratio, pipe, srtin, reference_speech, args.max_offset_seconds) for pipe in srt_pipes]
                             
                             ratio_results = []
                             for future in as_completed(futures):
@@ -264,7 +262,7 @@ def try_sync(
                         logger.warning("Parallel processing requested but multiprocessing not available")
                         # Fall back to sequential processing
                         for pipe in srt_pipes:
-                            (score, offset), pipe = test_framerate_ratio(pipe)
+                            (score, offset), pipe = _test_framerate_ratio(pipe, srtin, reference_speech, args.max_offset_seconds)
                             if score > best_score:
                                 best_score = score
                                 best_srt_pipe = pipe
@@ -272,7 +270,7 @@ def try_sync(
                 else:
                     # Sequential processing of framerate ratios
                     for pipe in srt_pipes:
-                        (score, offset), pipe = test_framerate_ratio(pipe)
+                        (score, offset), pipe = _test_framerate_ratio(pipe, srtin, reference_speech, args.max_offset_seconds)
                         if score > best_score:
                             best_score = score
                             best_srt_pipe = pipe

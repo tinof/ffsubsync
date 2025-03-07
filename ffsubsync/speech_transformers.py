@@ -10,8 +10,6 @@ from typing import cast, Callable, Dict, List, Optional, Union
 
 import ffmpeg
 import numpy as np
-import tqdm
-import multiprocessing
 import pickle
 import tempfile
 
@@ -28,7 +26,6 @@ from ffsubsync.sklearn_shim import TransformerMixin
 from ffsubsync.sklearn_shim import Pipeline
 from ffsubsync.subtitle_parser import make_subtitle_parser
 from ffsubsync.subtitle_transformers import SubtitleScaler
-
 
 logging.basicConfig(level=logging.INFO)
 logger: logging.Logger = logging.getLogger(__name__)
@@ -450,57 +447,40 @@ class VideoSpeechTransformer(TransformerMixin):
             "-"
         ])
         process = subprocess.Popen(ffmpeg_args, **subprocess_args(include_stdout=True))
+        from rich.progress import Progress
         bytes_per_frame = 2
         frames_per_window = bytes_per_frame * self.frame_rate // self.sample_rate
         windows_per_buffer = 1000
         simple_progress = 0.0
 
-        redirect_stderr = None
-        tqdm_extra_args = {}
-        should_print_redirected_stderr = self.gui_mode
-        if self.gui_mode:
-            try:
-                from contextlib import redirect_stderr  # type: ignore
-
-                tqdm_extra_args["file"] = sys.stdout
-            except ImportError:
-                should_print_redirected_stderr = False
-        if redirect_stderr is None:
-
-            @contextmanager
-            def redirect_stderr(enter_result=None):
-                yield enter_result
-
-        assert redirect_stderr is not None
-        pbar_output = io.StringIO()
-        with redirect_stderr(pbar_output):
-            with tqdm.tqdm(
-                total=total_duration, disable=self.vlc_mode, **tqdm_extra_args
-            ) as pbar:
+        if not self.vlc_mode:
+            with Progress("[progress.description]{task.description}", "[progress.percentage]{task.percentage:>3.0f}%", "Processed: {task.completed:.2f}/{task.total:.2f}") as progress:
+                task = progress.add_task("Extracting speech", total=total_duration if total_duration is not None else 0)
                 while True:
-                    in_bytes = process.stdout.read(
-                        frames_per_window * windows_per_buffer
-                    )
+                    in_bytes = process.stdout.read(frames_per_window * windows_per_buffer)
                     if not in_bytes:
                         break
                     newstuff = len(in_bytes) / float(bytes_per_frame) / self.frame_rate
-                    if (
-                        total_duration is not None
-                        and simple_progress + newstuff > total_duration
-                    ):
+                    if total_duration is not None and simple_progress + newstuff > total_duration:
                         newstuff = total_duration - simple_progress
                     simple_progress += newstuff
-                    pbar.update(newstuff)
-                    if self.vlc_mode and total_duration is not None:
-                        print("%d" % int(simple_progress * 100.0 / total_duration))
-                        sys.stdout.flush()
-                    if should_print_redirected_stderr:
-                        assert self.gui_mode
-                        # no need to flush since we pass -u to do unbuffered output for gui mode
-                        print(pbar_output.read())
+                    progress.update(task, advance=newstuff)
                     if "silero" not in self.vad:
                         in_bytes = np.frombuffer(in_bytes, np.uint8)
                     media_bstring.append(detector(in_bytes))
+        else:
+            while True:
+                in_bytes = process.stdout.read(frames_per_window * windows_per_buffer)
+                if not in_bytes:
+                    break
+                newstuff = len(in_bytes) / float(bytes_per_frame) / self.frame_rate
+                simple_progress += newstuff
+                if total_duration is not None:
+                    print(f"{int(simple_progress * 100.0 / total_duration)}")
+                    sys.stdout.flush()
+                if "silero" not in self.vad:
+                    in_bytes = np.frombuffer(in_bytes, np.uint8)
+                media_bstring.append(detector(in_bytes))
         process.wait()
         if len(media_bstring) == 0:
             raise ValueError(

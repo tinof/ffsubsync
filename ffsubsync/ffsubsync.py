@@ -430,32 +430,27 @@ def make_reference_pipe(args: argparse.Namespace) -> Pipeline:
         # Only pass valid parameters to VideoSpeechTransformer
         kwargs = {}
         
-        # If memory-optimized mode is enabled, adjust parameters
-        if hasattr(args, 'memory_optimized') and args.memory_optimized:
-            logger.info("Using memory-optimized mode")
-            # Add valid memory optimization parameters
-            kwargs['use_segments'] = True
-            kwargs['segment_size'] = getattr(args, 'segment_length', 300)  # Use segment_length if defined
+        # If memory-optimized mode is enabled, log that it is handled externally
+        if getattr(args, 'memory_optimized', False):
+            logger.info("Using memory-optimized mode (handled externally), not passing memory optimization parameters to VideoSpeechTransformer")
         
-        return Pipeline(
-            [
-                (
-                    "speech_extract",
-                    VideoSpeechTransformer(
-                        vad=vad,
-                        sample_rate=SAMPLE_RATE,
-                        frame_rate=args.frame_rate,
-                        non_speech_label=args.non_speech_label,
-                        start_seconds=args.start_seconds,
-                        ffmpeg_path=args.ffmpeg_path,
-                        ref_stream=ref_stream,
-                        vlc_mode=args.vlc_mode,
-                        gui_mode=args.gui_mode,
-                        **kwargs
-                    ),
+        return Pipeline([
+            (
+                "speech_extract",
+                VideoSpeechTransformer(
+                    vad=vad,
+                    sample_rate=SAMPLE_RATE,
+                    frame_rate=args.frame_rate,
+                    non_speech_label=args.non_speech_label,
+                    start_seconds=args.start_seconds,
+                    ffmpeg_path=args.ffmpeg_path,
+                    ref_stream=ref_stream,
+                    vlc_mode=args.vlc_mode,
+                    gui_mode=args.gui_mode,
+                    **kwargs
                 ),
-            ]
-        )
+            ),
+        ])
 
 
 def extract_subtitles_from_reference(args: argparse.Namespace) -> int:
@@ -645,10 +640,26 @@ def _process_segment(args_dict, segment_idx, start, end, temp_dir):
     segment_args.max_seconds = end - start
     segment_args.memory_optimized = False  # Avoid recursive optimization
     
+    # Modify process title to help identify in logs
+    try:
+        import setproctitle
+        setproctitle.setproctitle(f"ffsubsync-seg{segment_idx}")
+    except ImportError:
+        pass
+    
+    # Customize the log format to include segment information
+    segment_prefix = f"[Segment {segment_idx}] "
+    logger.info(f"{segment_prefix}Processing {start:.2f}s to {end:.2f}s")
+    
     # Create unique output path for this segment
     segment_output = os.path.join(temp_dir, f"segment_{segment_idx}.npz")
     
     try:
+        # Disable tqdm progress bars in worker processes to avoid interleaved output
+        import tqdm
+        original_tqdm = tqdm.tqdm
+        tqdm.tqdm = lambda *args, **kwargs: original_tqdm(*args, **kwargs, disable=True)
+        
         # Extract speech from this segment
         reference_pipe = make_reference_pipe(segment_args)
         if reference_pipe is None:
@@ -670,6 +681,8 @@ def _process_segment(args_dict, segment_idx, start, end, temp_dir):
         speech_activity = np.mean(speech)
         speech_transitions = np.sum(np.abs(np.diff(speech)))
         
+        logger.info(f"{segment_prefix}Processing complete - speech activity: {speech_activity:.3f}, transitions: {speech_transitions:.0f}")
+        
         return {
             'idx': segment_idx,
             'start': start,
@@ -679,8 +692,12 @@ def _process_segment(args_dict, segment_idx, start, end, temp_dir):
             'output_path': segment_output
         }
     except Exception as e:
-        logger.warning(f"Failed to process segment {segment_idx} ({start:.2f}s to {end:.2f}s): {e}")
+        logger.warning(f"{segment_prefix}Failed: {e}")
         return None
+    finally:
+        # Restore tqdm
+        if 'original_tqdm' in locals():
+            tqdm.tqdm = original_tqdm
 
 
 def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool:
@@ -695,6 +712,7 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
     import os
     import tempfile
     from copy import deepcopy
+    import time
     
     # Check file size
     if not os.path.exists(args.reference):
@@ -755,31 +773,41 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
             # Try parallel processing
             import multiprocessing
             from concurrent.futures import ProcessPoolExecutor, as_completed
+            import tqdm
             
             logger.info("Processing segments in parallel")
             max_workers = min(multiprocessing.cpu_count(), len(segments))
             
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                futures = [
-                    executor.submit(_process_segment, args_dict, i, start, end, temp_dir) 
-                    for i, (start, end) in enumerate(segments)
-                ]
-                
-                for future in as_completed(futures):
-                    try:
-                        segment_result = future.result()
-                        if segment_result:
-                            segment_results.append(segment_result)
-                    except Exception as e:
-                        logger.warning(f"Error in parallel segment processing: {e}")
+            # Create a master progress bar for overall progress
+            with tqdm.tqdm(total=len(segments), desc="Segments", unit="seg") as pbar:
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [
+                        executor.submit(_process_segment, args_dict, i, start, end, temp_dir) 
+                        for i, (start, end) in enumerate(segments)
+                    ]
+                    
+                    for future in as_completed(futures):
+                        try:
+                            segment_result = future.result()
+                            if segment_result:
+                                segment_results.append(segment_result)
+                            pbar.update(1)
+                        except Exception as e:
+                            logger.warning(f"Error in parallel segment processing: {e}")
+                            pbar.update(1)
                         
         except (ImportError, Exception) as e:
             # Fall back to sequential processing
             logger.warning(f"Parallel processing failed, falling back to sequential: {e}")
-            for i, (start, end) in enumerate(segments):
-                segment_result = _process_segment(args_dict, i, start, end, temp_dir)
-                if segment_result:
-                    segment_results.append(segment_result)
+            import tqdm
+            
+            # Create a master progress bar for sequential processing
+            with tqdm.tqdm(total=len(segments), desc="Segments", unit="seg") as pbar:
+                for i, (start, end) in enumerate(segments):
+                    segment_result = _process_segment(args_dict, i, start, end, temp_dir)
+                    if segment_result:
+                        segment_results.append(segment_result)
+                    pbar.update(1)
         
         # If we have at least one successful segment, use it for synchronization
         if not segment_results:

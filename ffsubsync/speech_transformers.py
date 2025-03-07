@@ -12,6 +12,7 @@ import ffmpeg
 import numpy as np
 import pickle
 import tempfile
+import multiprocessing
 
 from ffsubsync.constants import (
     DEFAULT_ENCODING,

@@ -608,7 +608,6 @@ def _npy_savename(args: argparse.Namespace) -> str:
     return os.path.splitext(args.reference)[0] + ".npz"
 
 
-# Define process_segment outside of process_large_file to make it pickleable
 def _process_segment(args_dict, segment_idx, start, end, temp_dir):
     """Process a single video segment for speech extraction.
     
@@ -626,6 +625,10 @@ def _process_segment(args_dict, segment_idx, start, end, temp_dir):
     import numpy as np
     from copy import deepcopy
     import logging
+    import sys
+    import tempfile
+    import time
+    from datetime import datetime
     
     logger = logging.getLogger(__name__)
     
@@ -653,13 +656,22 @@ def _process_segment(args_dict, segment_idx, start, end, temp_dir):
     segment_output = os.path.join(temp_dir, f"segment_{segment_idx}.npz")
     
     try:
-        # Disable tqdm progress bars in worker processes to avoid interleaved output
-        import tqdm
-        original_tqdm = tqdm.tqdm
-        def patched_tqdm(*args, **kwargs):
-            kwargs['disable'] = True
-            return original_tqdm(*args, **kwargs)
-        tqdm.tqdm = patched_tqdm
+        # Handle progress reporting - make sure we have rich 
+        try:
+            from rich.progress import Progress
+        except ImportError:
+            # Create dummy progress reporting if rich is not available
+            class Progress:
+                def __init__(self, *args, **kwargs):
+                    pass
+                def __enter__(self):
+                    return self
+                def __exit__(self, *args):
+                    pass
+                def add_task(self, *args, **kwargs):
+                    return 0
+                def update(self, *args, **kwargs):
+                    pass
         
         # Extract speech from this segment
         reference_pipe = make_reference_pipe(segment_args)
@@ -694,11 +706,8 @@ def _process_segment(args_dict, segment_idx, start, end, temp_dir):
         }
     except Exception as e:
         logger.warning(f"{segment_prefix}Failed: {e}")
+        
         return None
-    finally:
-        # Restore tqdm
-        if 'original_tqdm' in locals():
-            tqdm.tqdm = original_tqdm
 
 
 def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool:

@@ -45,6 +45,111 @@ from ffsubsync.subtitle_parser import make_subtitle_parser
 from ffsubsync.subtitle_transformers import SubtitleMerger, SubtitleShifter, SubtitleMorpher
 from ffsubsync.version import get_version
 
+# Create shared helpers for progress reporting
+class ProgressReporter:
+    """Shared utility for handling progress reporting that works in both main and worker processes
+    
+    Rich has a fundamental limitation: only one live display can be active per process.
+    When using multiprocessing, if each worker tries to create a Rich progress display,
+    we get the error "Only one live display may be active at once".
+    
+    This class provides a solution by:
+    1. Detecting whether we're in a worker process or main process
+    2. Using real Rich displays only in the main process
+    3. Using dummy progress displays in worker processes that maintain the same API
+    
+    This approach ensures we get proper progress reporting without conflicts.
+    """
+    
+    @staticmethod
+    def is_worker_process():
+        """Detect if we're in a worker process"""
+        # First try process title
+        try:
+            import setproctitle
+            current_proc_title = setproctitle.getproctitle()
+            if current_proc_title.startswith('ffsubsync-seg'):
+                return True
+        except ImportError:
+            pass
+            
+        # Then try multiprocessing API
+        return multiprocessing.current_process().name != 'MainProcess'
+    
+    @staticmethod
+    def get_progress_class():
+        """Return appropriate progress class based on context
+        
+        Returns a dummy progress class in worker processes to avoid conflicts with
+        Rich's limitation of only one live display per process.
+        """
+        # In worker processes, return a dummy progress display
+        if ProgressReporter.is_worker_process():
+            # DummyProgress is needed because worker processes cannot create
+            # Rich live displays without conflicting with the main process.
+            # This maintains the same API but doesn't actually display anything.
+            class DummyProgress:
+                def __init__(self, *args, **kwargs):
+                    pass
+                def __enter__(self):
+                    return self
+                def __exit__(self, *args, **kwargs):
+                    pass
+                def add_task(self, *args, **kwargs):
+                    return 0
+                def update(self, *args, **kwargs):
+                    pass
+            return DummyProgress
+        
+        # In main process, use actual Rich progress display
+        try:
+            from rich.progress import Progress
+            return Progress
+        except ImportError:
+            # Fallback if Rich not available
+            class DummyProgress:
+                def __init__(self, *args, **kwargs):
+                    pass
+                def __enter__(self):
+                    return self
+                def __exit__(self, *args, **kwargs):
+                    pass
+                def add_task(self, *args, **kwargs):
+                    return 0
+                def update(self, *args, **kwargs):
+                    pass
+            return DummyProgress
+            
+    @staticmethod
+    def create_progress_display(*args, **kwargs):
+        """Create the appropriate progress display with optimal settings
+        
+        This centralizes progress creation to enable further optimizations.
+        In main process, we use a proper Rich display with console capture.
+        In worker processes, we use a dummy display that maintains API compatibility.
+        
+        Args:
+            *args: Arguments to pass to Progress constructor
+            **kwargs: Keyword arguments to pass to Progress constructor
+            
+        Returns:
+            A progress display object (either Rich Progress or DummyProgress)
+        """
+        Progress = ProgressReporter.get_progress_class()
+        
+        if not ProgressReporter.is_worker_process():
+            # In main process, potentially add console capture
+            try:
+                from rich.console import Console
+                # Create a progress display with a captured console if possible
+                console = Console()
+                return Progress(*args, console=console, **kwargs)
+            except ImportError:
+                # Just use standard Rich progress if console module not available
+                return Progress(*args, **kwargs)
+        else:
+            # In worker process, use dummy progress
+            return Progress(*args, **kwargs)
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -656,23 +761,6 @@ def _process_segment(args_dict, segment_idx, start, end, temp_dir):
     segment_output = os.path.join(temp_dir, f"segment_{segment_idx}.npz")
     
     try:
-        # Handle progress reporting - make sure we have rich 
-        try:
-            from rich.progress import Progress
-        except ImportError:
-            # Create dummy progress reporting if rich is not available
-            class Progress:
-                def __init__(self, *args, **kwargs):
-                    pass
-                def __enter__(self):
-                    return self
-                def __exit__(self, *args):
-                    pass
-                def add_task(self, *args, **kwargs):
-                    return 0
-                def update(self, *args, **kwargs):
-                    pass
-        
         # Extract speech from this segment
         reference_pipe = make_reference_pipe(segment_args)
         if reference_pipe is None:
@@ -783,10 +871,17 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
             # Try parallel processing
             import multiprocessing
             from concurrent.futures import ProcessPoolExecutor, as_completed
-            from rich.progress import Progress
+            
+            # Create optimized progress display
+            progress = ProgressReporter.create_progress_display(
+                "[progress.description]{task.description}", 
+                "[progress.percentage]{task.percentage:>3.0f}%", 
+                "Processed: {task.completed}/{task.total}"
+            )
+            
             logger.info("Processing segments in parallel")
             max_workers = min(multiprocessing.cpu_count(), len(segments))
-            with Progress("[progress.description]{task.description}", "[progress.percentage]{task.percentage:>3.0f}%", "Processed: {task.completed}/{task.total}") as progress:
+            with progress:
                 task = progress.add_task("Processing segments", total=len(segments))
                 with ProcessPoolExecutor(max_workers=max_workers) as executor:
                     futures = [
@@ -804,8 +899,15 @@ def process_large_file(args: argparse.Namespace, result: Dict[str, Any]) -> bool
                         progress.update(task, advance=1)
         except (ImportError, Exception) as e:
             logger.warning(f"Parallel processing failed, falling back to sequential: {e}")
-            from rich.progress import Progress
-            with Progress("[progress.description]{task.description}", "[progress.percentage]{task.percentage:>3.0f}%", "Processed: {task.completed}/{task.total}") as progress:
+            
+            # Create optimized progress display
+            progress = ProgressReporter.create_progress_display(
+                "[progress.description]{task.description}", 
+                "[progress.percentage]{task.percentage:>3.0f}%", 
+                "Processed: {task.completed}/{task.total}"
+            )
+            
+            with progress:
                 task = progress.add_task("Processing segments sequentially", total=len(segments))
                 for i, (start, end) in enumerate(segments):
                     segment_result = _process_segment(args_dict, i, start, end, temp_dir)

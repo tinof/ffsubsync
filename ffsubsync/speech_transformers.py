@@ -448,14 +448,23 @@ class VideoSpeechTransformer(TransformerMixin):
             "-"
         ])
         process = subprocess.Popen(ffmpeg_args, **subprocess_args(include_stdout=True))
-        from rich.progress import Progress
         bytes_per_frame = 2
         frames_per_window = bytes_per_frame * self.frame_rate // self.sample_rate
         windows_per_buffer = 1000
         simple_progress = 0.0
 
+        # Import ProgressReporter to get the appropriate progress display
+        from ffsubsync.ffsubsync import ProgressReporter
+        
         if not self.vlc_mode:
-            with Progress("[progress.description]{task.description}", "[progress.percentage]{task.percentage:>3.0f}%", "Processed: {task.completed:.2f}/{task.total:.2f}") as progress:
+            # Create optimized progress display for current context
+            progress = ProgressReporter.create_progress_display(
+                "[progress.description]{task.description}", 
+                "[progress.percentage]{task.percentage:>3.0f}%", 
+                "Processed: {task.completed:.2f}/{task.total:.2f}"
+            )
+            
+            with progress:
                 task = progress.add_task("Extracting speech", total=total_duration if total_duration is not None else 0)
                 while True:
                     in_bytes = process.stdout.read(frames_per_window * windows_per_buffer)

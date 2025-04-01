@@ -29,20 +29,40 @@ button at the top, or using the below Paypal Donate button:
 
 Install
 -------
-First, make sure ffmpeg is installed. On MacOS, this looks like:
-~~~
-brew install ffmpeg
-~~~
-(Windows users: make sure `ffmpeg` is on your path and can be referenced
-from the command line!)
+**Recommended Method (using pipx):**
 
-Next, grab the package (compatible with Python >= 3.6):
+[pipx](https://github.com/pypa/pipx) installs Python applications into isolated environments, making them available globally without interfering with system packages.
+
+1.  **Install ffmpeg:** `ffsubsync` requires `ffmpeg` to process video files.
+    *   On macOS: `brew install ffmpeg`
+    *   On Debian/Ubuntu: `sudo apt update && sudo apt install ffmpeg`
+    *   On other systems: Follow the official [ffmpeg installation guide](https://ffmpeg.org/download.html).
+
+2.  **Install pipx:** If you don't have `pipx` installed, follow the [official pipx installation guide](https://pipx.pypa.io/stable/installation/).
+
+3.  **Install ffsubsync:**
+    ~~~
+    pipx install ffsubsync
+    ~~~
+
+**Alternative Method (using pip):**
+
+If you prefer to manage the environment yourself or are developing `ffsubsync`:
+
+1.  **Install ffmpeg:** (See step 1 above)
+
+2.  **Install ffsubsync:**
+    ~~~
+    pip install ffsubsync
+    ~~~
+
+**Installing the Latest Development Version:**
+
+To install the latest code directly from GitHub (use with caution):
 ~~~
-pip install ffsubsync
-~~~
-If you want to live dangerously, you can grab the latest version as follows:
-~~~
-pip install git+https://github.com/smacke/ffsubsync@latest
+pipx install git+https://github.com/smacke/ffsubsync.git
+# Or using pip:
+# pip install git+https://github.com/smacke/ffsubsync.git
 ~~~
 
 Usage
@@ -65,22 +85,40 @@ ffsubsync reference.srt -i unsynchronized.srt -o synchronized.srt
 `ffsubsync` uses the file extension to decide whether to perform voice activity
 detection on the audio or to directly extract speech from an srt file.
 
-Sync Issues
------------
-If the sync fails, the following recourses are available:
-- Try to sync assuming identical video / subtitle framerates by passing
-  `--no-fix-framerate`;
-- Try passing `--gss` to use [golden-section search](https://en.wikipedia.org/wiki/Golden-section_search)
-  to find the optimal ratio between video and subtitle framerates (by default,
-  only a few common ratios are evaluated);
-- Try a value of `--max-offset-seconds` greater than the default of 60, in the
-  event that the subtitles are out of sync by more than 60 seconds (empirically
-  unlikely in practice, but possible).
-- Try `--vad=auditok` since [auditok](https://github.com/amsehili/auditok) can
-  sometimes work better in the case of low-quality audio than WebRTC's VAD.
-  Auditok does not specifically detect voice, but instead detects all audio;
-  this property can yield suboptimal syncing behavior when a proper VAD can
-  work well, but can be effective in some cases.
+Alignment Modes & Sync Issues
+-----------------------------
+
+`ffsubsync` now features two main alignment strategies:
+
+1.  **Standard Mode (Default):** This mode finds the single best global time offset and framerate scaling factor to align the subtitles. It works well for most common cases where the desynchronization is consistent throughout the file.
+2.  **Anchor-Based Mode (Experimental):** This mode is designed to handle more complex synchronization issues, such as non-linear drift (where the timing difference changes over time) or structural differences caused by edits (like commercial breaks). It works by:
+    *   Performing an initial global alignment.
+    *   Iteratively finding multiple high-confidence "anchor points" throughout the media.
+    *   Applying piecewise time adjustments ("warping") between these anchor points.
+
+**Automatic Fallback (Default Behavior):**
+
+By default, `ffsubsync` uses an intelligent tiered approach:
+*   It first attempts synchronization using the **Standard Mode**.
+*   It evaluates the quality of the standard alignment based on the correlation score and the calculated offset.
+*   If the standard alignment appears poor (low score or very large offset, based on internal thresholds), it automatically attempts a fallback using the **Anchor-Based Mode**.
+*   The result from the anchor-based fallback is used only if its internal confidence score is sufficient; otherwise, the tool reverts to the standard result (with warnings).
+
+This default behavior aims to provide the robustness of the anchor-based method when needed, without sacrificing the speed and simplicity of the standard method for common cases.
+
+**Manual Control & Troubleshooting:**
+
+If synchronization fails or produces suboptimal results with the default settings:
+
+*   **Force Anchor Mode:** You can explicitly force the use of the anchor-based aligner by adding the `--use-anchor-based-aligner` (or `--anchor-mode`) flag. This can be helpful if you suspect non-linear drift that the automatic detection might have missed.
+    ~~~
+    ffs video.mp4 -i unsync.srt -o sync.srt --use-anchor-based-aligner
+    ~~~
+*   **Adjust Standard Mode Parameters:**
+    *   Try `--no-fix-framerate` if you suspect the framerate is actually correct.
+    *   Try `--gss` to perform a more thorough search for the optimal framerate ratio.
+    *   Increase `--max-offset-seconds` if the offset might be larger than 60 seconds.
+*   **Try a Different VAD:** Use `--vad=auditok` or `--vad=silero` (if installed) if the default VAD struggles with the audio quality. `auditok` detects general audio activity, while `silero` is another speech-specific VAD.
 
 If the sync still fails, consider trying one of the following similar tools:
 - [sc0ty/subsync](https://github.com/sc0ty/subsync): does speech-to-text and looks for matching word morphemes
@@ -108,33 +146,27 @@ The synchronization algorithm operates in 3 steps:
    the one built into [webrtc](https://webrtc.org/).
 3. Now we have two binary strings: one for the subtitles, and one for the
    video.  Try to align these strings by matching 0's with 0's and 1's with
-   1's. We score these alignments as (# video 1's matched w/ subtitle 1's) - (#
-   video 1's matched with subtitle 0's).
+   1's. We score these alignments based on maximizing the cross-correlation between the signals.
 
-The best-scoring alignment from step 3 determines how to offset the subtitles
-in time so that they are properly synced with the video. Because the binary
-strings are fairly long (millions of digits for video longer than an hour), the
-naive O(n^2) strategy for scoring all alignments is unacceptable. Instead, we
-use the fact that "scoring all alignments" is a convolution operation and can
-be implemented with the Fast Fourier Transform (FFT), bringing the complexity
-down to O(n log n).
+The standard alignment mode finds the single global offset that maximizes this correlation across the entire signal using the Fast Fourier Transform (FFT) for efficiency (O(n log n)).
+
+The anchor-based mode extends this by first finding a global offset, then iteratively identifying high-confidence local alignment points (anchors) within segments, and finally warping the subtitle timeline based on these anchors.
 
 Limitations
 -----------
-In most cases, inconsistencies between video and subtitles occur when starting
-or ending segments present in video are not present in subtitles, or vice versa.
-This can occur, for example, when a TV episode recap in the subtitles was pruned
-from video. FFsubsync typically works well in these cases, and in my experience
-this covers >95% of use cases. Handling breaks and splits outside of the beginning
-and ending segments is left to future work (see below).
+While the new anchor-based mode aims to handle more complex synchronization issues like non-linear drift and mid-file breaks/edits (e.g., commercial insertions/deletions), its effectiveness can depend on the quality of the VAD signal and the distinctiveness of speech patterns around potential anchor points.
+
+*   **Threshold Tuning:** The automatic fallback logic relies on internal thresholds for score and offset, which are empirically determined and might need adjustment for certain types of content.
+*   **Anchor Confidence:** The confidence calculation for anchors is based on local signal correlation. Very noisy audio or long periods of silence/music can still make it difficult to find reliable anchors.
+*   **Extreme Edits:** Very large or numerous insertions/deletions might still pose a challenge, although the anchor mode is better equipped to handle them than the standard mode.
 
 Future Work
 -----------
-Besides general stability and usability improvements, one line
-of work aims to extend the synchronization algorithm to handle splits
-/ breaks in the middle of video not present in subtitles (or vice versa).
-Developing a robust solution will take some time (assuming one is possible).
-See [#10](https://github.com/smacke/ffsubsync/issues/10) for more details.
+*   Refining the anchor selection and confidence scoring logic.
+*   Implementing segment-level fallbacks within the anchor mode (e.g., reverting specific segments to linear interpolation if local confidence is too low).
+*   Improving the automatic detection thresholds for the tiered fallback mechanism.
+*   Exploring alternative local alignment algorithms (e.g., Dynamic Time Warping) as potential additions or replacements for local FFT within the anchor mode.
+*   General stability and usability improvements.
 
 History
 -------

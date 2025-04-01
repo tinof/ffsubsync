@@ -442,31 +442,99 @@ class SubtitleSpeechTransformer(TransformerMixin, ComputeSpeechFrameBoundariesMi
         self.start_seconds: int = start_seconds
         self.framerate_ratio: float = framerate_ratio
         self.subtitle_speech_results_: Optional[np.ndarray] = None
-        self.max_time_: Optional[int] = None
+        self.max_time_: Optional[float] = None # Store as float seconds
 
     def fit(self, subs: List[GenericSubtitle], *_) -> "SubtitleSpeechTransformer":
-        max_time = 0
+        max_reasonable_time_sec = 10 * 60 * 60 # 10 hours limit
+        max_time_sec = 0.0
+        subs_processed = 0
+        subs_skipped = 0
         for sub in subs:
-            max_time = max(max_time, sub.end.total_seconds())
-        self.max_time_ = max_time - self.start_seconds
-        samples = np.zeros(int(max_time * self.sample_rate) + 2, dtype=float)
+            sub_end_sec = sub.end.total_seconds()
+            # Add check for unreasonable end times
+            if sub_end_sec > max_reasonable_time_sec:
+                logger.warning(f"Subtitle end time {sub.end} exceeds limit ({max_reasonable_time_sec}s), skipping for max_time calculation.")
+                subs_skipped += 1
+                continue # Skip this sub for max_time calculation
+            max_time_sec = max(max_time_sec, sub_end_sec)
+            subs_processed += 1
+
+        if subs_processed == 0 and subs_skipped > 0:
+             logger.error("All subtitles had timestamps exceeding the reasonable limit. Cannot process.")
+             # Set results to empty/default to avoid downstream errors?
+             self.subtitle_speech_results_ = np.array([], dtype=float)
+             self.max_time_ = 0.0
+             self.start_frame_ = 0
+             self.end_frame_ = 0
+             return self
+        elif subs_processed == 0:
+             logger.warning("No valid subtitles found to process.")
+             self.subtitle_speech_results_ = np.array([], dtype=float)
+             self.max_time_ = 0.0
+             self.start_frame_ = 0
+             self.end_frame_ = 0
+             return self
+
+
+        self.max_time_ = max_time_sec - self.start_seconds
+        # Ensure max_time_ is not negative if start_seconds is large
+        self.max_time_ = max(0.0, self.max_time_)
+
+        # Calculate array size based on the determined max_time_sec
+        array_size = int(round(self.max_time_ * self.sample_rate)) + 2
+        try:
+            samples = np.zeros(array_size, dtype=float)
+        except MemoryError:
+             logger.error(f"MemoryError: Failed to allocate array of size {array_size} (max_time={self.max_time_:.2f}s). Check subtitle timestamps.")
+             raise # Re-raise the memory error
+        except ValueError as e: # Catches negative sizes if max_time_ somehow becomes negative after rounding
+             logger.error(f"ValueError creating array: size={array_size}, max_time={self.max_time_:.2f}s. Error: {e}")
+             raise
+
         start_frame = float("inf")
         end_frame = 0
         for i, sub in enumerate(subs):
             if _is_metadata(sub.content, i == 0 or i + 1 == len(subs)):
                 continue
-            start = int(
-                round(
-                    (sub.start.total_seconds() - self.start_seconds) * self.sample_rate
-                )
-            )
-            start_frame = min(start_frame, start)
-            duration = sub.end.total_seconds() - sub.start.total_seconds()
-            end = start + int(round(duration * self.sample_rate))
-            end_frame = max(end_frame, end)
-            samples[start:end] = min(1.0 / self.framerate_ratio, 1.0)
+            # Skip metadata and previously skipped subs
+            if _is_metadata(sub.content, i == 0 or i + 1 == len(subs)) or sub.end.total_seconds() > max_reasonable_time_sec:
+                continue
+
+            start_sec = sub.start.total_seconds() - self.start_seconds
+            end_sec = sub.end.total_seconds() - self.start_seconds
+
+            # Ensure times are not negative after subtracting start_seconds
+            start_sec = max(0.0, start_sec)
+            end_sec = max(0.0, end_sec)
+
+            # Ensure end is not before start
+            if end_sec < start_sec:
+                 logger.warning(f"Subtitle has end time before start time after offset: Start={start_sec:.3f}s, End={end_sec:.3f}s. Skipping.")
+                 continue
+
+            start_sample = int(round(start_sec * self.sample_rate))
+            end_sample = int(round(end_sec * self.sample_rate))
+
+            # Clamp indices to be within the allocated array bounds
+            start_sample = max(0, min(start_sample, array_size - 1))
+            end_sample = max(0, min(end_sample, array_size - 1)) # end is exclusive for slicing
+
+            if start_sample >= end_sample: # Skip zero or negative duration samples
+                 continue
+
+            start_frame = min(start_frame, start_sample)
+            end_frame = max(end_frame, end_sample) # end_frame tracks the max *exclusive* index used
+
+            # Fill the samples array, ensuring indices are valid
+            samples[start_sample:end_sample] = min(1.0 / self.framerate_ratio, 1.0)
+
         self.subtitle_speech_results_ = samples
-        self.fit_boundaries(self.subtitle_speech_results_)
+        # Handle case where no valid frames were found
+        if start_frame == float("inf"):
+             self.start_frame_ = 0
+             self.end_frame_ = 0
+        else:
+             self.fit_boundaries(self.subtitle_speech_results_)
         return self
 
     def transform(self, *_) -> np.ndarray:

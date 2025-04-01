@@ -1,4 +1,4 @@
-auditok==0.1.5
+auditok
 chardet;python_version>='3.7'
 charset_normalizer
 faust-cchardet

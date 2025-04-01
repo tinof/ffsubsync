@@ -730,7 +730,8 @@ def _run_impl(args: argparse.Namespace, result: Dict[str, Any]) -> bool:
         # Handle case where only offset is applied or input is same as reference
         # Need to decide if try_sync should handle this or if it's an error
         # For now, let try_sync handle it (it will skip sync if reference_pipe is None)
-        return try_sync(args, None, result)[0] # Return only the success status
+        # try_sync now returns only bool
+        return try_sync(args, None, result)
 
     reference_pipe = make_reference_pipe(args)
     logger.info("extracting speech segments from reference '%s'...", args.reference)
@@ -751,7 +752,8 @@ def _run_impl(args: argparse.Namespace, result: Dict[str, Any]) -> bool:
                 "Unsynchronized subtitle file not specified; skipping synchronization"
             )
             return False # Cannot sync without input subs
-    return try_sync(args, reference_pipe, result)[0] # Return only the success status
+    # try_sync now returns only bool
+    return try_sync(args, reference_pipe, result)
 
 
 def validate_and_transform_args(

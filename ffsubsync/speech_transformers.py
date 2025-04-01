@@ -247,31 +247,73 @@ class VideoSpeechTransformer(TransformerMixin):
         self.video_speech_results_: Optional[np.ndarray] = None
 
     def try_fit_using_embedded_subs(self, fname: str) -> None:
+        """
+        Attempts to extract speech segments using embedded subtitle streams.
+        Uses ffprobe to find existing subtitle streams first.
+        """
         embedded_subs = []
         embedded_subs_times = []
-        if self.ref_stream is None:
-            # check first 5; should cover 99% of movies
-            streams_to_try: List[str] = list(map("0:s:{}".format, range(5)))
-        else:
+        streams_to_try: List[str] = []
+
+        if self.ref_stream is not None:
+            # If user specified a stream, only try that one
             streams_to_try = [self.ref_stream]
-        for stream in streams_to_try:
-            ffmpeg_args = [
-                ffmpeg_bin_path(
-                    "ffmpeg", ffmpeg_resources_path=self.ffmpeg_path
-                )
-            ]
+            logger.info(f"Checking specified subtitle stream: {self.ref_stream}")
+        else:
+            # Use ffprobe to find actual subtitle streams
+            logger.info("Probing for existing subtitle streams using ffprobe...")
+            try:
+                ffprobe_path = ffmpeg_bin_path("ffprobe", ffmpeg_resources_path=self.ffmpeg_path)
+                ffprobe_args = [
+                    ffprobe_path,
+                    "-v", "quiet",
+                    "-print_format", "json",
+                    "-show_streams",
+                    fname
+                ]
+                process = subprocess.Popen(ffprobe_args, **subprocess_args(include_stdout=True))
+                stdout, stderr = process.communicate()
+                if process.returncode == 0:
+                    probe_data = json.loads(stdout)
+                    for stream in probe_data.get("streams", []):
+                        if stream.get("codec_type") == "subtitle":
+                            stream_index = stream.get("index")
+                            # Construct the stream specifier (e.g., 0:s:0 or just index if simple)
+                            # Assuming simple index mapping for now, might need refinement
+                            # Let's stick to the 0:s:index format for consistency with ffmpeg map
+                            stream_specifier = f"0:s:{stream_index}"
+                            streams_to_try.append(stream_specifier)
+                    logger.info(f"Found subtitle streams: {streams_to_try}")
+                else:
+                    logger.warning(f"ffprobe failed with return code {process.returncode}. Falling back to trying default streams.")
+                    # Fallback to trying first few streams if ffprobe fails
+                    streams_to_try = list(map("0:s:{}".format, range(5)))
+
+            except FileNotFoundError:
+                logger.error(f"ffprobe not found at {ffprobe_path}. Install ffmpeg or check path. Falling back to trying default streams.")
+                streams_to_try = list(map("0:s:{}".format, range(5)))
+            except Exception as e:
+                logger.error(f"Error running ffprobe: {e}. Falling back to trying default streams.")
+                streams_to_try = list(map("0:s:{}".format, range(5)))
+
+        if not streams_to_try:
+             logger.warning("No subtitle streams found or specified to check.")
+             raise ValueError("No subtitle streams found to extract.") # Raise error to trigger VAD fallback
+
+        # Now iterate only over the streams identified (or specified)
+        for stream_specifier in streams_to_try:
+            logger.info(f"Attempting to extract subtitle stream {stream_specifier}...")
+            ffmpeg_path_bin = ffmpeg_bin_path("ffmpeg", ffmpeg_resources_path=self.ffmpeg_path)
+            # Correctly initialize and extend the ffmpeg arguments list
+            ffmpeg_args = [ffmpeg_path_bin]
             ffmpeg_args.extend(
                 [
-                    "-loglevel",
-                    "fatal",
+                    "-loglevel", "fatal", # Keep fatal to avoid excessive ffmpeg logs
                     "-nostdin",
-                    "-i",
-                    fname,
-                    "-map",
-                    "{}".format(stream),
-                    "-f",
-                    "srt",
-                    "-",
+                    "-i", fname,
+                    "-map", stream_specifier,
+                    "-f", "srt",
+                    "-", # Output to stdout
                 ]
             )
             process = subprocess.Popen(

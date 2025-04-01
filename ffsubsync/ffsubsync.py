@@ -525,7 +525,6 @@ def make_reference_pipe(args: argparse.Namespace) -> Pipeline:
                         start_seconds=args.start_seconds,
                         ffmpeg_path=args.ffmpeg_path,
                         ref_stream=ref_stream,
-                        vlc_mode=args.vlc_mode,
                     ),
                 ),
             ]

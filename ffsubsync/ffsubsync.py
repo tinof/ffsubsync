@@ -168,8 +168,6 @@ def try_sync(
     }
     # result["sync_was_successful"] = False # This will be set based on overall_sync_successful
     # sync_was_successful = True # This will be determined per file and aggregated
-    # DEBUGGING: Log the state of args.srtin before the check
-    logger.info(f"DEBUG: args.srtin before check: {args.srtin}")
     logger.info(
         "extracting speech segments from %s...",
         "stdin" if not args.srtin else "subtitles file(s) {}".format(args.srtin),

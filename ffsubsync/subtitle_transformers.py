@@ -87,8 +87,9 @@ class SubtitleWarper(SubsMixin, TransformerMixin):
             return self.timing_map_[-1][0]
 
         # Interpolate between anchor points timing_map_[idx-1] and timing_map_[idx]
-        ref1, sub1 = self.timing_map_[idx - 1]
-        ref2, sub2 = self.timing_map_[idx]
+        # Unpack all 3 elements (ref, sub, confidence), but ignore confidence (_) for interpolation
+        ref1, sub1, _ = self.timing_map_[idx - 1]
+        ref2, sub2, _ = self.timing_map_[idx]
 
         # Avoid division by zero if anchor points have the same subtitle time (shouldn't happen with distinct anchors)
         if sub2 == sub1:

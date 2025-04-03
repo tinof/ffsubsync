@@ -43,7 +43,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 # --- Auto-Mode Thresholds ---
 # Thresholds for triggering fallback to anchor mode (empirical, may need tuning)
 # Normalized score threshold (lower means potentially bad global alignment)
-STANDARD_SCORE_THRESHOLD_NORM = 0.1
+STANDARD_SCORE_THRESHOLD_NORM = 0.25
 # Offset threshold in seconds (large offsets might indicate issues)
 STANDARD_OFFSET_THRESHOLD_SEC = 60.0
 # Confidence threshold for accepting the anchor mode result after fallback

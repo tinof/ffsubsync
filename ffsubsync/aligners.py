@@ -50,7 +50,9 @@ class FFTAligner(TransformerMixin):
             list(map(int, s)) if isinstance(s, str) else s
             for s in [refstring, substring]
         ]
-        refstring, substring = (2 * np.array(s).astype(float) - 1 for s in [refstring, substring])
+        refstring, substring = (
+            2 * np.array(s).astype(float) - 1 for s in [refstring, substring]
+        )
         total_bits = math.log(len(substring) + len(refstring), 2)
         total_length = int(2 ** math.ceil(total_bits))
         extra_zeros = total_length - len(substring) - len(refstring)

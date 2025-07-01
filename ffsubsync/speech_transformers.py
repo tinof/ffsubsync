@@ -383,9 +383,7 @@ class VideoSpeechTransformer(TransformerMixin):
             total=total_duration, disable=self.vlc_mode, **tqdm_extra_args
         ) as pbar:
             while True:
-                in_bytes = process.stdout.read(
-                    frames_per_window * windows_per_buffer
-                )
+                in_bytes = process.stdout.read(frames_per_window * windows_per_buffer)
                 if not in_bytes:
                     break
                 newstuff = len(in_bytes) / float(bytes_per_frame) / self.frame_rate
@@ -431,10 +429,7 @@ def _is_metadata(content: str, is_beginning_or_end: bool) -> bool:
     content = content.strip()
     if len(content) == 0:
         return True
-    if (
-        content[0] in _PAIRED_NESTER
-        and content[-1] == _PAIRED_NESTER[content[0]]
-    ):
+    if content[0] in _PAIRED_NESTER and content[-1] == _PAIRED_NESTER[content[0]]:
         return True
     if is_beginning_or_end:
         if "english" in content.lower():
@@ -467,8 +462,8 @@ class SubtitleSpeechTransformer(TransformerMixin, ComputeSpeechFrameBoundariesMi
             if _is_metadata(sub.content, i == 0 or i + 1 == len(subs)):
                 continue
             start = round(
-                    (sub.start.total_seconds() - self.start_seconds) * self.sample_rate
-                )
+                (sub.start.total_seconds() - self.start_seconds) * self.sample_rate
+            )
             start_frame = min(start_frame, start)
             duration = sub.end.total_seconds() - sub.start.total_seconds()
             end = start + round(duration * self.sample_rate)

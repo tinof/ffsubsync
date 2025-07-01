@@ -31,5 +31,9 @@ WEBSITE: str = f"https://github.com/{GITHUB_DEV_USER}/{GITHUB_REPO}/"
 DEV_WEBSITE: str = "https://smacke.net/"
 
 # No trailing slash important for this one...
-API_RELEASE_URL: str = f"https://api.github.com/repos/{GITHUB_DEV_USER}/{GITHUB_REPO}/releases/latest"
-RELEASE_URL: str = f"https://github.com/{GITHUB_DEV_USER}/{GITHUB_REPO}/releases/latest/"
+API_RELEASE_URL: str = (
+    f"https://api.github.com/repos/{GITHUB_DEV_USER}/{GITHUB_REPO}/releases/latest"
+)
+RELEASE_URL: str = (
+    f"https://github.com/{GITHUB_DEV_USER}/{GITHUB_REPO}/releases/latest/"
+)

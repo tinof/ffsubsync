@@ -380,9 +380,7 @@ def make_pipeline(*steps, **kwargs) -> Pipeline:
     """
     verbose = kwargs.pop("verbose", False)
     if kwargs:
-        raise TypeError(
-            f'Unknown keyword arguments: "{next(iter(kwargs.keys()))}"'
-        )
+        raise TypeError(f'Unknown keyword arguments: "{next(iter(kwargs.keys()))}"')
     return Pipeline(_name_estimators(steps), verbose=verbose)
 
 

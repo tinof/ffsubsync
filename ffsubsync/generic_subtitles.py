@@ -34,9 +34,7 @@ class GenericSubtitle:
         elif isinstance(self.inner, pysubs2.SSAEvent):
             ret = self.inner.text
         else:
-            raise NotImplementedError(
-                f"unsupported subtitle type: {type(self.inner)}"
-            )
+            raise NotImplementedError(f"unsupported subtitle type: {type(self.inner)}")
         return ret
 
     def resolve_inner_timestamps(self):
@@ -48,9 +46,7 @@ class GenericSubtitle:
             ret.start = pysubs2.make_time(s=self.start.total_seconds())
             ret.end = pysubs2.make_time(s=self.end.total_seconds())
         else:
-            raise NotImplementedError(
-                f"unsupported subtitle type: {type(self.inner)}"
-            )
+            raise NotImplementedError(f"unsupported subtitle type: {type(self.inner)}")
         return ret
 
     def merge_with(self, other):
@@ -60,9 +56,7 @@ class GenericSubtitle:
             inner_merged.content = f"{inner_merged.content}\n{other.inner.content}"
             return self.__class__(self.start, self.end, inner_merged)
         else:
-            raise NotImplementedError(
-                f"unsupported subtitle type: {type(self.inner)}"
-            )
+            raise NotImplementedError(f"unsupported subtitle type: {type(self.inner)}")
 
     @classmethod
     def wrap_inner_subtitle(cls, sub) -> "GenericSubtitle":

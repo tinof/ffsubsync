@@ -118,9 +118,7 @@ class GenericSubtitleParser(SubsMixin, TransformerMixin):
                 elif self.sub_format in ("ass", "ssa", "sub", "vtt"):
                     parsed_subs = pysubs2.SSAFile.from_string(decoded_subs)
                 else:
-                    raise NotImplementedError(
-                        f"unsupported format: {self.sub_format}"
-                    )
+                    raise NotImplementedError(f"unsupported format: {self.sub_format}")
                 extra_generic_subtitle_file_kwargs = {}
                 if isinstance(parsed_subs, pysubs2.SSAFile):
                     extra_generic_subtitle_file_kwargs.update(
@@ -128,7 +126,9 @@ class GenericSubtitleParser(SubsMixin, TransformerMixin):
                             "styles": parsed_subs.styles,
                             # pysubs2 on Python >= 3.6 doesn't support this
                             "fonts_opaque": getattr(parsed_subs, "fonts_opaque", None),
-                            "info": parsed_subs.info if not self._skip_ssa_info else None,
+                            "info": parsed_subs.info
+                            if not self._skip_ssa_info
+                            else None,
                         }
                     )
                 self.subs_ = GenericSubtitlesFile(

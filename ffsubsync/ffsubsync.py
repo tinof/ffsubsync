@@ -327,11 +327,11 @@ def validate_args(args: argparse.Namespace) -> None:
         if len(args.srtin) > 1 and args.gui_mode:
             raise ValueError("cannot specify multiple input srt files in GUI mode")
     if (
-        args.make_test_case and not args.gui_mode and (not args.srtin or args.srtout is None)
+        args.make_test_case
+        and not args.gui_mode
+        and (not args.srtin or args.srtout is None)
     ):  # this validation not necessary for gui mode
-        raise ValueError(
-            "need to specify input and output srt files for test cases"
-        )
+        raise ValueError("need to specify input and output srt files for test cases")
     if args.overwrite_input:
         if args.extract_subs_from_stream is not None:
             raise ValueError(

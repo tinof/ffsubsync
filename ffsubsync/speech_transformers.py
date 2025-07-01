@@ -236,7 +236,6 @@ class VideoSpeechTransformer(TransformerMixin):
         ffmpeg_path: Optional[str] = None,
         ref_stream: Optional[str] = None,
         vlc_mode: bool = False,
-        gui_mode: bool = False,
     ) -> None:
         super(VideoSpeechTransformer, self).__init__()
         self.vad: str = vad
@@ -247,7 +246,6 @@ class VideoSpeechTransformer(TransformerMixin):
         self.ffmpeg_path: Optional[str] = ffmpeg_path
         self.ref_stream: Optional[str] = ref_stream
         self.vlc_mode: bool = vlc_mode
-        self.gui_mode: bool = gui_mode
         self.video_speech_results_: Optional[np.ndarray] = None
 
     def try_fit_using_embedded_subs(self, fname: str) -> None:
@@ -261,7 +259,7 @@ class VideoSpeechTransformer(TransformerMixin):
         for stream in streams_to_try:
             ffmpeg_args = [
                 ffmpeg_bin_path(
-                    "ffmpeg", self.gui_mode, ffmpeg_resources_path=self.ffmpeg_path
+                    "ffmpeg", ffmpeg_resources_path=self.ffmpeg_path
                 )
             ]
             ffmpeg_args.extend(
@@ -319,7 +317,6 @@ class VideoSpeechTransformer(TransformerMixin):
                         fname,
                         cmd=ffmpeg_bin_path(
                             "ffprobe",
-                            self.gui_mode,
                             ffmpeg_resources_path=self.ffmpeg_path,
                         ),
                     )["format"]["duration"]
@@ -346,7 +343,7 @@ class VideoSpeechTransformer(TransformerMixin):
         media_bstring: List[np.ndarray] = []
         ffmpeg_args = [
             ffmpeg_bin_path(
-                "ffmpeg", self.gui_mode, ffmpeg_resources_path=self.ffmpeg_path
+                "ffmpeg", ffmpeg_resources_path=self.ffmpeg_path
             )
         ]
         if self.start_seconds > 0:
@@ -382,14 +379,7 @@ class VideoSpeechTransformer(TransformerMixin):
 
         redirect_stderr = None
         tqdm_extra_args = {}
-        should_print_redirected_stderr = self.gui_mode
-        if self.gui_mode:
-            try:
-                from contextlib import redirect_stderr  # type: ignore
-
-                tqdm_extra_args["file"] = sys.stdout
-            except ImportError:
-                should_print_redirected_stderr = False
+        should_print_redirected_stderr = False
         if redirect_stderr is None:
 
             @contextmanager
@@ -419,10 +409,7 @@ class VideoSpeechTransformer(TransformerMixin):
                     if self.vlc_mode and total_duration is not None:
                         print("%d" % int(simple_progress * 100.0 / total_duration))
                         sys.stdout.flush()
-                    if should_print_redirected_stderr:
-                        assert self.gui_mode
-                        # no need to flush since we pass -u to do unbuffered output for gui mode
-                        print(pbar_output.read())
+
                     if "silero" not in self.vad:
                         in_bytes = np.frombuffer(in_bytes, np.uint8)
                     media_bstring.append(detector(in_bytes))

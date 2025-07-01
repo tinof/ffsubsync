@@ -259,7 +259,6 @@ def make_reference_pipe(args: argparse.Namespace) -> Pipeline:
                         ffmpeg_path=args.ffmpeg_path,
                         ref_stream=ref_stream,
                         vlc_mode=args.vlc_mode,
-                        gui_mode=args.gui_mode,
                     ),
                 ),
             ]
@@ -277,7 +276,7 @@ def extract_subtitles_from_reference(args: argparse.Namespace) -> int:
             "invalid stream for subtitle extraction: %s", args.extract_subs_from_stream
         )
     ffmpeg_args = [
-        ffmpeg_bin_path("ffmpeg", args.gui_mode, ffmpeg_resources_path=args.ffmpeg_path)
+        ffmpeg_bin_path("ffmpeg", ffmpeg_resources_path=args.ffmpeg_path)
     ]
     ffmpeg_args.extend(
         [
@@ -466,8 +465,7 @@ def validate_and_transform_args(
         if parser is not None:
             parser.print_usage()
         return None
-    if args.gui_mode and args.srtout is None:
-        args.srtout = "{}.synced.srt".format(os.path.splitext(args.srtin[0])[0])
+
     try:
         validate_file_permissions(args)
     except ValueError as e:
@@ -703,7 +701,6 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
         help="If specified, refuse to parse srt files with formatting issues.",
     )
     parser.add_argument("--vlc-mode", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--gui-mode", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--skip-sync", action="store_true", help=argparse.SUPPRESS)
 
 

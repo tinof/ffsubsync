@@ -11,7 +11,7 @@ FFsubsync
 [![PyPI Version](https://img.shields.io/pypi/v/ffsubsync.svg)](https://pypi.org/project/ffsubsync)
 
 
-Language-agnostic automatic synchronization of subtitles with video, so that
+A command-line tool for language-agnostic automatic synchronization of subtitles with video, so that
 subtitles are aligned to the correct starting point within the video.
 
 Turn this:                       |  Into this:
@@ -29,29 +29,68 @@ button at the top, or using the below Paypal Donate button:
 
 Install
 -------
-First, make sure ffmpeg is installed. On MacOS, this looks like:
+First, make sure ffmpeg is installed:
+
+**On macOS:**
 ~~~
 brew install ffmpeg
 ~~~
-(Windows users: make sure `ffmpeg` is on your path and can be referenced
-from the command line!)
 
-Next, grab the package (compatible with Python >= 3.6):
+**On Linux (Ubuntu/Debian):**
+~~~
+sudo apt update
+sudo apt install ffmpeg
+~~~
+
+**On Linux (CentOS/RHEL/Fedora):**
+~~~
+sudo dnf install ffmpeg
+# or for older versions: sudo yum install ffmpeg
+~~~
+
+### Recommended Installation (pipx)
+
+The recommended way to install ffsubsync is using [pipx](https://pypa.github.io/pipx/), which installs the package in an isolated environment and makes the CLI commands globally available:
+
+~~~
+pipx install ffsubsync
+~~~
+
+If you don't have pipx installed, you can install it first:
+~~~
+pip install pipx
+~~~
+
+### Alternative Installation (pip)
+
+You can also install using pip (requires Python >= 3.8):
 ~~~
 pip install ffsubsync
 ~~~
-If you want to live dangerously, you can grab the latest version as follows:
+
+For the latest development version:
 ~~~
-pip install git+https://github.com/smacke/ffsubsync@latest
+pipx install git+https://github.com/smacke/ffsubsync@latest
 ~~~
+
+**Note:** This tool supports Linux and macOS only. Windows is not supported.
 
 Usage
 -----
-`ffs`, `subsync` and `ffsubsync` all work as entrypoints:
+After installation, three CLI commands are available: `ffs`, `subsync`, and `ffsubsync` (all are equivalent):
+
+**Basic synchronization with video:**
 ~~~
 ffs video.mp4 -i unsynchronized.srt -o synchronized.srt
 ~~~
 
+**Using any of the three command aliases:**
+~~~
+subsync video.mp4 -i unsynchronized.srt -o synchronized.srt
+ffsubsync video.mp4 -i unsynchronized.srt -o synchronized.srt
+~~~
+
+**Synchronization using reference subtitles:**
 There may be occasions where you have a correctly synchronized srt file in a
 language you are unfamiliar with, as well as an unsynchronized srt file in your
 native language. In this case, you can use the correctly synchronized srt file
@@ -59,11 +98,30 @@ directly as a reference for synchronization, instead of using the video as the
 reference:
 
 ~~~
-ffsubsync reference.srt -i unsynchronized.srt -o synchronized.srt
+ffs reference.srt -i unsynchronized.srt -o synchronized.srt
 ~~~
 
-`ffsubsync` uses the file extension to decide whether to perform voice activity
+**Running as a Python module:**
+~~~
+python -m ffsubsync video.mp4 -i unsynchronized.srt -o synchronized.srt
+~~~
+
+The tool uses the file extension to decide whether to perform voice activity
 detection on the audio or to directly extract speech from an srt file.
+
+Platform Support
+----------------
+This tool is designed for command-line usage and supports:
+- **Linux** (all major distributions)
+- **macOS** (Intel and Apple Silicon)
+
+**Note:** Windows is not supported in this version. The tool is optimized for Unix-like systems.
+
+Requirements
+------------
+- **Python:** 3.8 or higher
+- **ffmpeg:** Must be installed and available in your system PATH
+- **Dependencies:** All Python dependencies are automatically installed during package installation
 
 Sync Issues
 -----------

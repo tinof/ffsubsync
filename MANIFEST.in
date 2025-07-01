@@ -1,3 +1,9 @@
 include *.rst
+include *.md
+include *.txt
+include *.toml
 include versioneer.py
 include ffsubsync/_version.py
+recursive-include ffsubsync *.py
+global-exclude __pycache__
+global-exclude *.py[co]

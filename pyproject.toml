@@ -1,3 +1,94 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "versioneer[toml]==0.29"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ffsubsync"
+dynamic = ["version"]
+description = "Language-agnostic synchronization of subtitles with video."
+readme = "README.md"
+license = "MIT"
+authors = [
+    {name = "Stephen Macke", email = "stephen.macke@gmail.com"}
+]
+maintainers = [
+    {name = "Stephen Macke", email = "stephen.macke@gmail.com"}
+]
+keywords = ["subtitle", "synchronization", "video", "audio", "ffmpeg"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+
+    "Natural Language :: English",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Utilities",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "auditok==0.1.5",
+    "chardet",
+    "charset_normalizer",
+    "faust-cchardet",
+    "ffmpeg-python",
+    "numpy>=1.12.0",
+    "pysubs2>=1.2.0",
+    "rich",
+    "setuptools",
+    "srt>=3.0.0",
+    "tqdm",
+    "typing_extensions",
+    "webrtcvad",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "flake8",
+    "mypy",
+    "pytest",
+    "pytest-cov",
+    "pyyaml",
+    "ruff",
+    "twine",
+    "types-requests",
+    "versioneer",
+]
+
+[project.urls]
+Homepage = "https://github.com/smacke/ffsubsync"
+Repository = "https://github.com/smacke/ffsubsync"
+Issues = "https://github.com/smacke/ffsubsync/issues"
+
+[project.scripts]
+ffsubsync = "ffsubsync:main"
+ffs = "ffsubsync:main"
+subsync = "ffsubsync:main"
+
+[tool.setuptools]
+packages = ["ffsubsync"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+ffsubsync = ["py.typed"]
+
+[tool.versioneer]
+VCS = "git"
+style = "pep440"
+versionfile_source = "ffsubsync/_version.py"
+versionfile_build = "ffsubsync/_version.py"
+tag_prefix = ""
+parentdir_prefix = "ffsubsync-"
+
 [tool.black]
 line-length = 88
 target-version = ['py39']

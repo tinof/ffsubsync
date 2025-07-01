@@ -1,3 +1,0 @@
-gooey
-pyinstaller>=3.6
-requests

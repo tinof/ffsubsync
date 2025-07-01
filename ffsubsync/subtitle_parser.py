@@ -1,22 +1,20 @@
-# -*- coding: utf-8 -*-
-from datetime import timedelta
 import logging
-from typing import Any, cast, List, Optional
+from datetime import timedelta
+from typing import Any, List, Optional, cast
 
 try:
     import cchardet
-except:  # noqa: E722
+except:
     cchardet = None
 try:
     import chardet
-except:  # noqa: E722
+except:
     chardet = None
 try:
     import charset_normalizer
-except:  # noqa: E722
+except:
     charset_normalizer = None
 import pysubs2
-from ffsubsync.sklearn_shim import TransformerMixin
 import srt
 
 from ffsubsync.constants import (
@@ -26,6 +24,7 @@ from ffsubsync.constants import (
 )
 from ffsubsync.file_utils import open_file
 from ffsubsync.generic_subtitles import GenericSubtitle, GenericSubtitlesFile, SubsMixin
+from ffsubsync.sklearn_shim import TransformerMixin
 
 logging.basicConfig(level=logging.INFO)
 logger: logging.Logger = logging.getLogger(__name__)
@@ -100,14 +99,14 @@ class GenericSubtitleParser(SubsMixin, TransformerMixin):
                         detected_encoding = cast(
                             Optional[str], chardet_lib.detect(subs)["encoding"]
                         )
-                    except:  # noqa: E722
+                    except:
                         continue
                     if detected_encoding is not None:
                         self.detected_encoding_ = detected_encoding
                         encodings_to_try = (detected_encoding,)
                         break
             assert self.detected_encoding_ is not None
-            logger.info("detected encoding: %s" % self.detected_encoding_)
+            logger.info(f"detected encoding: {self.detected_encoding_}")
         exc = None
         for encoding in encodings_to_try:
             try:
@@ -120,17 +119,17 @@ class GenericSubtitleParser(SubsMixin, TransformerMixin):
                     parsed_subs = pysubs2.SSAFile.from_string(decoded_subs)
                 else:
                     raise NotImplementedError(
-                        "unsupported format: %s" % self.sub_format
+                        f"unsupported format: {self.sub_format}"
                     )
                 extra_generic_subtitle_file_kwargs = {}
                 if isinstance(parsed_subs, pysubs2.SSAFile):
                     extra_generic_subtitle_file_kwargs.update(
-                        dict(
-                            styles=parsed_subs.styles,
+                        {
+                            "styles": parsed_subs.styles,
                             # pysubs2 on Python >= 3.6 doesn't support this
-                            fonts_opaque=getattr(parsed_subs, "fonts_opaque", None),
-                            info=parsed_subs.info if not self._skip_ssa_info else None,
-                        )
+                            "fonts_opaque": getattr(parsed_subs, "fonts_opaque", None),
+                            "info": parsed_subs.info if not self._skip_ssa_info else None,
+                        }
                     )
                 self.subs_ = GenericSubtitlesFile(
                     _preprocess_subs(
@@ -145,7 +144,7 @@ class GenericSubtitleParser(SubsMixin, TransformerMixin):
                 self.fit_fname = "<stdin>" if fname is None else fname
                 if len(encodings_to_try) > 1:
                     self.detected_encoding_ = encoding
-                    logger.info("detected encoding: %s" % self.detected_encoding_)
+                    logger.info(f"detected encoding: {self.detected_encoding_}")
                 return self
             except Exception as e:
                 exc = e

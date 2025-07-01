@@ -4,6 +4,7 @@ mypy
 pytest
 pytest-cov
 pyyaml
+ruff
 twine
 types-requests
 versioneer

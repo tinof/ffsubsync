@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 from typing import List, Tuple
-
 
 SUBSYNC_RESOURCES_ENV_MAGIC: str = "ffsubsync_resources_xj48gjdkl340"
 
@@ -29,13 +27,9 @@ DESCRIPTION: str = "Synchronize subtitles with video."
 LONG_DESCRIPTION: str = (
     "Automatic and language-agnostic synchronization of subtitles with video."
 )
-WEBSITE: str = "https://github.com/{}/{}/".format(GITHUB_DEV_USER, GITHUB_REPO)
+WEBSITE: str = f"https://github.com/{GITHUB_DEV_USER}/{GITHUB_REPO}/"
 DEV_WEBSITE: str = "https://smacke.net/"
 
 # No trailing slash important for this one...
-API_RELEASE_URL: str = "https://api.github.com/repos/{}/{}/releases/latest".format(
-    GITHUB_DEV_USER, GITHUB_REPO
-)
-RELEASE_URL: str = "https://github.com/{}/{}/releases/latest/".format(
-    GITHUB_DEV_USER, GITHUB_REPO
-)
+API_RELEASE_URL: str = f"https://api.github.com/repos/{GITHUB_DEV_USER}/{GITHUB_REPO}/releases/latest"
+RELEASE_URL: str = f"https://github.com/{GITHUB_DEV_USER}/{GITHUB_REPO}/releases/latest/"

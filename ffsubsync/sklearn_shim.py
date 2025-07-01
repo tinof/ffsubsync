@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 This module borrows and adapts `Pipeline` from `sklearn.pipeline` and
 `TransformerMixin` from `sklearn.base` in the scikit-learn framework
@@ -36,9 +35,11 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
+
 from collections import defaultdict
 from itertools import islice
 from typing import Any, Callable, Optional
+
 from typing_extensions import Protocol
 
 
@@ -109,7 +110,7 @@ class Pipeline:
                     "All intermediate steps should be "
                     "transformers and implement fit and transform "
                     "or be the string 'passthrough' "
-                    "'%s' (type %s) doesn't" % (t, type(t))
+                    f"'{t}' (type {type(t)}) doesn't"
                 )
 
         # We allow last estimator to be None as an identity transformation
@@ -121,7 +122,7 @@ class Pipeline:
             raise TypeError(
                 "Last step of Pipeline should implement fit "
                 "or be the string 'passthrough'. "
-                "'%s' (type %s) doesn't" % (estimator, type(estimator))
+                f"'{estimator}' (type {type(estimator)}) doesn't"
             )
 
     def _iter(self, with_final=True, filter_passthrough=True):
@@ -136,9 +137,7 @@ class Pipeline:
             stop -= 1
 
         for idx, (name, trans) in enumerate(islice(self.steps, 0, stop)):
-            if not filter_passthrough:
-                yield idx, name, trans
-            elif trans is not None and trans != "passthrough":
+            if not filter_passthrough or (trans is not None and trans != "passthrough"):
                 yield idx, name, trans
 
     def __len__(self) -> int:
@@ -185,7 +184,7 @@ class Pipeline:
             return None
         name, step = self.steps[step_idx]
 
-        return "(step %d of %d) Processing %s" % (step_idx + 1, len(self.steps), name)
+        return f"(step {step_idx + 1} of {len(self.steps)}) Processing {name}"
 
     # Estimator interface
 
@@ -198,11 +197,11 @@ class Pipeline:
         for pname, pval in fit_params.items():
             if "__" not in pname:
                 raise ValueError(
-                    "Pipeline.fit does not accept the {} parameter. "
+                    f"Pipeline.fit does not accept the {pname} parameter. "
                     "You can pass parameters to specific steps of your "
                     "pipeline using the stepname__parameter format, e.g. "
                     "`Pipeline.fit(X, y, logisticregression__sample_weight"
-                    "=sample_weight)`.".format(pname)
+                    "=sample_weight)`."
                 )
             step, param = pname.split("__", 1)
             fit_params_steps[step][param] = pval
@@ -311,7 +310,8 @@ class Pipeline:
         # _final_estimator is None or has transform, otherwise attribute error
         # XXX: Handling the None case means we can't use if_delegate_has_method
         if self._final_estimator != "passthrough":
-            self._final_estimator.transform
+            # Check that transform method exists (will raise AttributeError if not)
+            self._final_estimator.transform  # noqa: B018
         return self._transform
 
     def _transform(self, X):
@@ -343,7 +343,7 @@ def _name_estimators(estimators):
         for estimator in estimators
     ]
     namecount = defaultdict(int)
-    for est, name in zip(estimators, names):
+    for _est, name in zip(estimators, names):
         namecount[name] += 1
 
     for k, v in list(namecount.items()):
@@ -353,7 +353,7 @@ def _name_estimators(estimators):
     for i in reversed(range(len(estimators))):
         name = names[i]
         if name in namecount:
-            names[i] += "-%d" % namecount[name]
+            names[i] += f"-{namecount[name]}"
             namecount[name] -= 1
 
     return list(zip(names, estimators))
@@ -381,7 +381,7 @@ def make_pipeline(*steps, **kwargs) -> Pipeline:
     verbose = kwargs.pop("verbose", False)
     if kwargs:
         raise TypeError(
-            'Unknown keyword arguments: "{}"'.format(list(kwargs.keys())[0])
+            f'Unknown keyword arguments: "{next(iter(kwargs.keys()))}"'
         )
     return Pipeline(_name_estimators(steps), verbose=verbose)
 

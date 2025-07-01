@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import sys
 
 
@@ -12,9 +11,9 @@ class open_file:
         self.closing = kwargs.pop("closing", False)
         if filename is None:
             stream = sys.stdout if "w" in args else sys.stdin
-            self.fh = open(stream.fileno(), *args, **kwargs)
+            self.fh = open(stream.fileno(), *args, **kwargs)  # noqa: SIM115
         elif isinstance(filename, str):
-            self.fh = open(filename, *args, **kwargs)
+            self.fh = open(filename, *args, **kwargs)  # noqa: SIM115
             self.closing = True
         else:
             self.fh = filename

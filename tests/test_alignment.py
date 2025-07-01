@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
 import pytest
+
 from ffsubsync.aligners import FFTAligner, MaxScoreAligner
 
 

@@ -1,7 +1,7 @@
-# -*- coding: utf-8 -*-
 import os
-from ffsubsync.constants import SUBSYNC_RESOURCES_ENV_MAGIC
+
 from ffsubsync._version import get_versions
+from ffsubsync.constants import SUBSYNC_RESOURCES_ENV_MAGIC
 
 __version__ = get_versions()["version"]
 del get_versions
@@ -34,6 +34,7 @@ def make_version_tuple(vstr=None):
 def update_available():
     import requests
     from requests.exceptions import Timeout
+
     from .constants import API_RELEASE_URL
 
     try:

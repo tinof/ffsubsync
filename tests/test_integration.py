@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+import contextlib
 import os
 import shutil
 import tempfile
@@ -6,10 +6,8 @@ import tempfile
 import numpy as np
 import pytest
 
-try:
+with contextlib.suppress(ImportError):  # pyyaml does not work with py3.4
     import yaml
-except ImportError:  # pyyaml does not work with py3.4
-    pass
 
 from ffsubsync import ffsubsync
 from ffsubsync.sklearn_shim import make_pipeline
@@ -33,19 +31,19 @@ def gen_synctest_configs():
 
     if INTEGRATION not in os.environ or os.environ[INTEGRATION] == 0:
         return
-    with open("test-data/integration-testing-config.yaml", "r") as f:
+    with open("test-data/integration-testing-config.yaml") as f:
         config = yaml.load(f, yaml.SafeLoader)
     parser = ffsubsync.make_parser()
     for test in config[SYNC_TESTS]:
-        if SKIP in test and test[SKIP]:
+        if test.get(SKIP):
             continue
         unparsed_args = [test_path(test[REF]), "-i", test_path(test[UNSYNCED])]
         if EXTRA_ARGS in test:
             for extra_key, extra_value in test[EXTRA_ARGS].items():
-                unparsed_args.extend(["--{}".format(extra_key), str(extra_value)])
+                unparsed_args.extend([f"--{extra_key}", str(extra_value)])
         if EXTRA_NO_VALUE_ARGS in test:
             for extra_key in test[EXTRA_NO_VALUE_ARGS]:
-                unparsed_args.append("--{}".format(extra_key))
+                unparsed_args.append(f"--{extra_key}")
         args = parser.parse_args(unparsed_args)
         truth = test_path(test[SYNCED])
         should_detect_encoding = None

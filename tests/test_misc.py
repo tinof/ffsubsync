@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
 import pytest
+
 from ffsubsync.version import make_version_tuple
 
 

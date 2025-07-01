@@ -1,6 +1,7 @@
 """Python program for golden section search (straight-up copied from Wikipedia).
-   This implementation reuses function evaluations, saving 1/2 of the evaluations per
-   iteration, and returns a bounding interval."""
+This implementation reuses function evaluations, saving 1/2 of the evaluations per
+iteration, and returns a bounding interval."""
+
 import logging
 import math
 
@@ -35,7 +36,7 @@ def gss(f, a, b, tol=1e-4):
         return a, b
 
     # Required steps to achieve tolerance
-    n = int(math.ceil(math.log(tol / h) / math.log(invphi)))
+    n = math.ceil(math.log(tol / h) / math.log(invphi))
     logger.info(
         "About to perform %d iterations of golden section search to find the best framerate",
         n,

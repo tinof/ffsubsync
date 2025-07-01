@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
-from datetime import timedelta
 import logging
 import numbers
+from datetime import timedelta
 
 from ffsubsync.generic_subtitles import GenericSubtitle, GenericSubtitlesFile, SubsMixin
 from ffsubsync.sklearn_shim import TransformerMixin

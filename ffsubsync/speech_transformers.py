@@ -1,12 +1,10 @@
-# -*- coding: utf-8 -*-
-import os
-from contextlib import contextmanager
-import logging
 import io
+import logging
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import timedelta
-from typing import cast, Callable, Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Union, cast
 
 import ffmpeg
 import numpy as np
@@ -21,11 +19,9 @@ from ffsubsync.constants import (
 )
 from ffsubsync.ffmpeg_utils import ffmpeg_bin_path, subprocess_args
 from ffsubsync.generic_subtitles import GenericSubtitle
-from ffsubsync.sklearn_shim import TransformerMixin
-from ffsubsync.sklearn_shim import Pipeline
+from ffsubsync.sklearn_shim import Pipeline, TransformerMixin
 from ffsubsync.subtitle_parser import make_subtitle_parser
 from ffsubsync.subtitle_transformers import SubtitleScaler
-
 
 logging.basicConfig(level=logging.INFO)
 logger: logging.Logger = logging.getLogger(__name__)
@@ -81,9 +77,9 @@ def _make_auditok_detector(
 ) -> Callable[[bytes], np.ndarray]:
     try:
         from auditok import (
-            BufferAudioSource,
             ADSFactory,
             AudioEnergyValidator,
+            BufferAudioSource,
             StreamTokenizer,
         )
     except ImportError as e:
@@ -237,7 +233,7 @@ class VideoSpeechTransformer(TransformerMixin):
         ref_stream: Optional[str] = None,
         vlc_mode: bool = False,
     ) -> None:
-        super(VideoSpeechTransformer, self).__init__()
+        super().__init__()
         self.vad: str = vad
         self.sample_rate: int = sample_rate
         self.frame_rate: int = frame_rate
@@ -258,9 +254,7 @@ class VideoSpeechTransformer(TransformerMixin):
             streams_to_try = [self.ref_stream]
         for stream in streams_to_try:
             ffmpeg_args = [
-                ffmpeg_bin_path(
-                    "ffmpeg", ffmpeg_resources_path=self.ffmpeg_path
-                )
+                ffmpeg_bin_path("ffmpeg", ffmpeg_resources_path=self.ffmpeg_path)
             ]
             ffmpeg_args.extend(
                 [
@@ -270,7 +264,7 @@ class VideoSpeechTransformer(TransformerMixin):
                     "-i",
                     fname,
                     "-map",
-                    "{}".format(stream),
+                    f"{stream}",
                     "-f",
                     "srt",
                     "-",
@@ -293,7 +287,7 @@ class VideoSpeechTransformer(TransformerMixin):
             if self.ref_stream is None:
                 error_msg = "Video file appears to lack subtitle stream"
             else:
-                error_msg = "Stream {} not found".format(self.ref_stream)
+                error_msg = f"Stream {self.ref_stream} not found"
             raise ValueError(error_msg)
         # use longest set of embedded subs
         subs_to_use = embedded_subs[int(np.argmax(embedded_subs_times))]
@@ -339,12 +333,10 @@ class VideoSpeechTransformer(TransformerMixin):
                 self.sample_rate, self.frame_rate, self._non_speech_label
             )
         else:
-            raise ValueError("unknown vad: %s" % self.vad)
+            raise ValueError(f"unknown vad: {self.vad}")
         media_bstring: List[np.ndarray] = []
         ffmpeg_args = [
-            ffmpeg_bin_path(
-                "ffmpeg", ffmpeg_resources_path=self.ffmpeg_path
-            )
+            ffmpeg_bin_path("ffmpeg", ffmpeg_resources_path=self.ffmpeg_path)
         ]
         if self.start_seconds > 0:
             ffmpeg_args.extend(
@@ -379,7 +371,6 @@ class VideoSpeechTransformer(TransformerMixin):
 
         redirect_stderr = None
         tqdm_extra_args = {}
-        should_print_redirected_stderr = False
         if redirect_stderr is None:
 
             @contextmanager
@@ -388,31 +379,30 @@ class VideoSpeechTransformer(TransformerMixin):
 
         assert redirect_stderr is not None
         pbar_output = io.StringIO()
-        with redirect_stderr(pbar_output):
-            with tqdm.tqdm(
-                total=total_duration, disable=self.vlc_mode, **tqdm_extra_args
-            ) as pbar:
-                while True:
-                    in_bytes = process.stdout.read(
-                        frames_per_window * windows_per_buffer
-                    )
-                    if not in_bytes:
-                        break
-                    newstuff = len(in_bytes) / float(bytes_per_frame) / self.frame_rate
-                    if (
-                        total_duration is not None
-                        and simple_progress + newstuff > total_duration
-                    ):
-                        newstuff = total_duration - simple_progress
-                    simple_progress += newstuff
-                    pbar.update(newstuff)
-                    if self.vlc_mode and total_duration is not None:
-                        print("%d" % int(simple_progress * 100.0 / total_duration))
-                        sys.stdout.flush()
+        with redirect_stderr(pbar_output), tqdm.tqdm(
+            total=total_duration, disable=self.vlc_mode, **tqdm_extra_args
+        ) as pbar:
+            while True:
+                in_bytes = process.stdout.read(
+                    frames_per_window * windows_per_buffer
+                )
+                if not in_bytes:
+                    break
+                newstuff = len(in_bytes) / float(bytes_per_frame) / self.frame_rate
+                if (
+                    total_duration is not None
+                    and simple_progress + newstuff > total_duration
+                ):
+                    newstuff = total_duration - simple_progress
+                simple_progress += newstuff
+                pbar.update(newstuff)
+                if self.vlc_mode and total_duration is not None:
+                    print(f"{int(simple_progress * 100.0 / total_duration)}")
+                    sys.stdout.flush()
 
-                    if "silero" not in self.vad:
-                        in_bytes = np.frombuffer(in_bytes, np.uint8)
-                    media_bstring.append(detector(in_bytes))
+                if "silero" not in self.vad:
+                    in_bytes = np.frombuffer(in_bytes, np.uint8)
+                media_bstring.append(detector(in_bytes))
         process.wait()
         if len(media_bstring) == 0:
             raise ValueError(
@@ -442,7 +432,7 @@ def _is_metadata(content: str, is_beginning_or_end: bool) -> bool:
     if len(content) == 0:
         return True
     if (
-        content[0] in _PAIRED_NESTER.keys()
+        content[0] in _PAIRED_NESTER
         and content[-1] == _PAIRED_NESTER[content[0]]
     ):
         return True
@@ -458,7 +448,7 @@ class SubtitleSpeechTransformer(TransformerMixin, ComputeSpeechFrameBoundariesMi
     def __init__(
         self, sample_rate: int, start_seconds: int = 0, framerate_ratio: float = 1.0
     ) -> None:
-        super(SubtitleSpeechTransformer, self).__init__()
+        super().__init__()
         self.sample_rate: int = sample_rate
         self.start_seconds: int = start_seconds
         self.framerate_ratio: float = framerate_ratio
@@ -476,14 +466,12 @@ class SubtitleSpeechTransformer(TransformerMixin, ComputeSpeechFrameBoundariesMi
         for i, sub in enumerate(subs):
             if _is_metadata(sub.content, i == 0 or i + 1 == len(subs)):
                 continue
-            start = int(
-                round(
+            start = round(
                     (sub.start.total_seconds() - self.start_seconds) * self.sample_rate
                 )
-            )
             start_frame = min(start_frame, start)
             duration = sub.end.total_seconds() - sub.start.total_seconds()
-            end = start + int(round(duration * self.sample_rate))
+            end = start + round(duration * self.sample_rate)
             end_frame = max(end_frame, end)
             samples[start:end] = min(1.0 / self.framerate_ratio, 1.0)
         self.subtitle_speech_results_ = samples
@@ -497,7 +485,7 @@ class SubtitleSpeechTransformer(TransformerMixin, ComputeSpeechFrameBoundariesMi
 
 class DeserializeSpeechTransformer(TransformerMixin):
     def __init__(self, non_speech_label: float) -> None:
-        super(DeserializeSpeechTransformer, self).__init__()
+        super().__init__()
         self._non_speech_label: float = non_speech_label
         self.deserialized_speech_results_: Optional[np.ndarray] = None
 
@@ -509,7 +497,7 @@ class DeserializeSpeechTransformer(TransformerMixin):
             else:
                 raise ValueError(
                     'could not find "speech" array in '
-                    "serialized file; only contains: %s" % speech.files
+                    f"serialized file; only contains: {speech.files}"
                 )
         speech[speech < 1.0] = self._non_speech_label
         self.deserialized_speech_results_ = speech

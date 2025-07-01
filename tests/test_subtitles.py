@@ -1,10 +1,9 @@
-# -*- coding: utf-8 -*-
 import itertools
-from io import BytesIO
 from datetime import timedelta
+from io import BytesIO
 
-import pytest
 import numpy as np
+import pytest
 
 from ffsubsync.sklearn_shim import make_pipeline
 from ffsubsync.speech_transformers import SubtitleSpeechTransformer
@@ -108,9 +107,9 @@ def test_speech_extraction(sample_rate, start_seconds):
     )[0]
     prev = 0
     for pos, sub in zip(consec_ones_end_pos, parser.subs_):
-        start = int(round(sub.start.total_seconds() * sample_rate))
+        start = round(sub.start.total_seconds() * sample_rate)
         duration = sub.end.total_seconds() - sub.start.total_seconds()
-        stop = start + int(round(duration * sample_rate))
+        stop = start + round(duration * sample_rate)
         assert bitstring_cumsum[pos] - prev == stop - start
         prev = bitstring_cumsum[pos]
 

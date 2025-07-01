@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import logging
 import sys
 
@@ -14,8 +13,8 @@ try:
         datefmt="[%X]",
         handlers=[RichHandler(console=Console(file=sys.stderr))],
     )
-except:  # noqa: E722
+except:
     logging.basicConfig(stream=sys.stderr, level=logging.INFO)
 
 from .version import __version__  # noqa
-from .ffsubsync import main  # noqa
+from .ffsubsync import main

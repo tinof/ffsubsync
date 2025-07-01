@@ -1,76 +1,187 @@
-name: ffsubsync
+name: CI/CD Pipeline
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+# Cancel in-progress runs for the same workflow and branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
+  # Code Quality Checks with Ruff
+  code-quality:
+    name: Code Quality (Ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'  # Use a stable Python version for linting
+
+      - name: Install Ruff
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+
+      - name: Run Ruff linting
+        run: |
+          echo "Running Ruff linting checks..."
+          ruff check . --output-format=github
+
+      - name: Run Ruff formatting check
+        run: |
+          echo "Checking code formatting with Ruff..."
+          ruff format --check .
+
+  # pipx Installation Testing
+  pipx-installation:
+    name: pipx Installation Test
+    needs: code-quality  # Only run if code quality checks pass
+    strategy:
+      fail-fast: false  # Continue testing other platforms if one fails
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
     runs-on: ${{ matrix.os }}
 
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history needed for versioneer
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install pipx
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pipx
+          python -m pipx ensurepath
+
+      - name: Build package
+        run: |
+          python -m pip install build
+          python -m build
+
+      - name: Install package with pipx
+        run: |
+          # Install from the built wheel
+          WHEEL_FILE=$(find dist -name "*.whl" | head -n 1)
+          echo "Installing wheel: $WHEEL_FILE"
+          pipx install "$WHEEL_FILE"
+
+      - name: Verify CLI tools are available
+        run: |
+          echo "Verifying ffsubsync CLI tools are installed and accessible..."
+
+          # Check that all three entry points are available
+          which ffsubsync
+          which ffs
+          which subsync
+
+          # Test basic functionality (help command should work without dependencies)
+          echo "Testing ffsubsync --help..."
+          ffsubsync --help
+
+          echo "Testing ffs --help..."
+          ffs --help
+
+          echo "Testing subsync --help..."
+          subsync --help
+
+      - name: Test CLI functionality
+        run: |
+          echo "Testing basic CLI functionality..."
+
+          # Test version command if available
+          if ffsubsync --version 2>/dev/null; then
+            echo "Version command works"
+          else
+            echo "Version command not available, testing help instead"
+            ffsubsync --help | head -5
+          fi
+
+  # Unit Tests (Linux and macOS only)
+  unit-tests:
+    name: Unit Tests
+    needs: code-quality
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+          pip install -e .
+
+      - name: Run unit tests
+        run: |
+          echo "Running unit tests..."
+          pytest -v -m 'not integration' tests/
+
+  # Integration Tests (Ubuntu only, limited Python versions)
+  integration-tests:
+    name: Integration Tests
+    needs: [code-quality, unit-tests]
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        os: [ 'ubuntu-22.04', 'windows-latest' ]
-        python-version: [ '3.7', '3.8', '3.9', '3.10', '3.11', '3.12', '3.13' ]
-        include:
-          - python-version: '3.7'
-            os: 'macos-13'
-          - python-version: '3.8'
-            os: 'macos-13'
-          - python-version: '3.9'
-            os: 'macos-13'
-          - python-version: '3.10'
-            os: 'macos-latest'
-          - python-version: '3.11'
-            os: 'macos-latest'
-          - python-version: '3.12'
-            os: 'macos-latest'
-          - python-version: '3.13'
-            os: 'macos-latest'
+        python-version: ['3.10', '3.11']  # Limited to reduce CI time
+
     steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 1
-    - uses: smacke/submodule-checkout@v3
-      if: ${{ matrix.os == 'ubuntu-latest' && matrix.python-version != '3.10'}}
-      with:
-        ssh-key: '${{ secrets.TEST_DATA_SECRET }}'
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install -r requirements-dev.txt
-        pip install -e .
-    - name: Lint with flake8
-      run: |
-        pip install flake8
-        # stop the build if there are Python syntax errors or undefined names
-        #flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        #flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-        flake8 . --exit-zero  
-    - name: Run unit tests with pytest (no coverage)
-      if: matrix.os != 'ubuntu-latest'
-      run: |
-        pytest --cov-config=.coveragerc --cov-report= --cov=ffsubsync -v -m 'not integration' tests/
-    - name: Run unit tests with pytest (with coverage)
-      if: matrix.os == 'ubuntu-latest'
-      run: |
-        pytest --cov-config=.coveragerc --cov-report=xml:cov.xml --cov=ffsubsync -v -m 'not integration' tests/
-    - name: Run integration tests with pytest
-      if: ${{ matrix.os == 'ubuntu-latest' && matrix.python-version != '3.10'}}
-      run: |
-        INTEGRATION=1 pytest --cov-config=.coveragerc --cov-report=xml:cov.xml --cov=ffsubsync -v -m 'integration' tests/
-    - name: Upload coverage report
-      if: matrix.os == 'ubuntu-latest'
-      uses: codecov/codecov-action@v1
-      with:
-        token: '${{ secrets.CODECOV_TOKEN }}'
-        files: ./cov.xml
-        env_vars: PYTHON
-        name: codecov-umbrella
-        fail_ci_if_error: true
-        verbose: true
+      - name: Checkout code with submodules
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout test data submodule
+        uses: smacke/submodule-checkout@v3
+        with:
+          ssh-key: '${{ secrets.TEST_DATA_SECRET }}'
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+          pip install -e .
+
+      - name: Run integration tests
+        env:
+          INTEGRATION: 1
+        run: |
+          echo "Running integration tests..."
+          pytest -v -m 'integration' tests/

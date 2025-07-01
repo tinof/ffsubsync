@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import logging
 import math
 from typing import List, Optional, Tuple, Type, Union
@@ -7,7 +6,6 @@ import numpy as np
 
 from ffsubsync.golden_section_search import gss
 from ffsubsync.sklearn_shim import Pipeline, TransformerMixin
-
 
 logging.basicConfig(level=logging.INFO)
 logger: logging.Logger = logging.getLogger(__name__)
@@ -52,9 +50,7 @@ class FFTAligner(TransformerMixin):
             list(map(int, s)) if isinstance(s, str) else s
             for s in [refstring, substring]
         ]
-        refstring, substring = map(
-            lambda s: 2 * np.array(s).astype(float) - 1, [refstring, substring]
-        )
+        refstring, substring = (2 * np.array(s).astype(float) - 1 for s in [refstring, substring])
         total_bits = math.log(len(substring) + len(refstring), 2)
         total_length = int(2 ** math.ceil(total_bits))
         extra_zeros = total_length - len(substring) - len(refstring)
@@ -152,7 +148,7 @@ class MaxScoreAligner(TransformerMixin):
             raise FailedToFindAlignmentException(
                 "Synchronization failed; consider passing "
                 "--max-offset-seconds with a number larger than "
-                "{}".format(self.max_offset_seconds)
+                f"{self.max_offset_seconds}"
             )
         (score, offset), subpipe = max(scores, key=lambda x: x[0][0])
         return (score, offset), subpipe

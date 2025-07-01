@@ -1,14 +1,12 @@
-# -*- coding: utf-8 -*-
 import copy
-from datetime import timedelta
 import logging
 import os
-from typing import cast, Any, Dict, Iterator, List, Optional
+import sys
+from datetime import timedelta
+from typing import Any, Dict, Iterator, List, Optional, cast
 
 import pysubs2
 import srt
-import sys
-
 
 logging.basicConfig(level=logging.INFO)
 logger: logging.Logger = logging.getLogger(__name__)
@@ -37,7 +35,7 @@ class GenericSubtitle:
             ret = self.inner.text
         else:
             raise NotImplementedError(
-                "unsupported subtitle type: %s" % type(self.inner)
+                f"unsupported subtitle type: {type(self.inner)}"
             )
         return ret
 
@@ -51,7 +49,7 @@ class GenericSubtitle:
             ret.end = pysubs2.make_time(s=self.end.total_seconds())
         else:
             raise NotImplementedError(
-                "unsupported subtitle type: %s" % type(self.inner)
+                f"unsupported subtitle type: {type(self.inner)}"
             )
         return ret
 
@@ -59,13 +57,11 @@ class GenericSubtitle:
         assert isinstance(self.inner, type(other.inner))
         inner_merged = copy.deepcopy(self.inner)
         if isinstance(self.inner, srt.Subtitle):
-            inner_merged.content = "{}\n{}".format(
-                inner_merged.content, other.inner.content
-            )
+            inner_merged.content = f"{inner_merged.content}\n{other.inner.content}"
             return self.__class__(self.start, self.end, inner_merged)
         else:
             raise NotImplementedError(
-                "unsupported subtitle type: %s" % type(self.inner)
+                f"unsupported subtitle type: {type(self.inner)}"
             )
 
     @classmethod
@@ -77,7 +73,7 @@ class GenericSubtitle:
                 timedelta(milliseconds=sub.start), timedelta(milliseconds=sub.end), sub
             )
         else:
-            raise NotImplementedError("unsupported subtitle type: %s" % type(sub))
+            raise NotImplementedError(f"unsupported subtitle type: {type(sub)}")
 
 
 class GenericSubtitlesFile:
@@ -155,7 +151,7 @@ class GenericSubtitlesFile:
         elif out_format == "srt":
             to_write = srt.compose(subs)
         else:
-            raise NotImplementedError("unsupported output format: %s" % out_format)
+            raise NotImplementedError(f"unsupported output format: {out_format}")
 
         with open(fname or sys.stdout.fileno(), "wb") as f:
             f.write(to_write.encode(self._encoding))

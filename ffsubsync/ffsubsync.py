@@ -1,26 +1,25 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 import argparse
-from datetime import datetime
 import logging
 import os
 import shutil
 import subprocess
 import sys
-from typing import cast, Any, Callable, Dict, List, Optional, Tuple, Union
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
 import numpy as np
 
 from ffsubsync.aligners import FFTAligner, MaxScoreAligner
 from ffsubsync.constants import (
     DEFAULT_APPLY_OFFSET_SECONDS,
+    DEFAULT_ENCODING,
     DEFAULT_FRAME_RATE,
     DEFAULT_MAX_OFFSET_SECONDS,
     DEFAULT_MAX_SUBTITLE_SECONDS,
     DEFAULT_NON_SPEECH_LABEL,
     DEFAULT_START_SECONDS,
     DEFAULT_VAD,
-    DEFAULT_ENCODING,
     FRAMERATE_RATIOS,
     SAMPLE_RATE,
     SUBTITLE_EXTENSIONS,
@@ -28,14 +27,13 @@ from ffsubsync.constants import (
 from ffsubsync.ffmpeg_utils import ffmpeg_bin_path
 from ffsubsync.sklearn_shim import Pipeline, TransformerMixin
 from ffsubsync.speech_transformers import (
-    VideoSpeechTransformer,
     DeserializeSpeechTransformer,
+    VideoSpeechTransformer,
     make_subtitle_speech_pipeline,
 )
 from ffsubsync.subtitle_parser import make_subtitle_parser
 from ffsubsync.subtitle_transformers import SubtitleMerger, SubtitleShifter
 from ffsubsync.version import get_version
-
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -60,7 +58,7 @@ def make_test_case(
     tar_dir = "{}.{}".format(
         args.reference, datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     )
-    logger.info("creating test archive {}.tar.gz...".format(tar_dir))
+    logger.info(f"creating test archive {tar_dir}.tar.gz...")
     os.mkdir(tar_dir)
     try:
         log_path = "ffsubsync.log"
@@ -76,7 +74,7 @@ def make_test_case(
             shutil.copy(npy_savename, tar_dir)
         else:
             shutil.move(npy_savename, tar_dir)
-        supported_formats = set(list(zip(*shutil.get_archive_formats()))[0])
+        supported_formats = set(next(zip(*shutil.get_archive_formats())))
         preferred_formats = ["gztar", "bztar", "xztar", "zip", "tar"]
         for archive_format in preferred_formats:
             if archive_format in supported_formats:
@@ -97,10 +95,7 @@ def make_test_case(
 def get_srt_pipe_maker(
     args: argparse.Namespace, srtin: Optional[str]
 ) -> Callable[[Optional[float]], Union[Pipeline, Callable[[float], Pipeline]]]:
-    if srtin is None:
-        srtin_format = "srt"
-    else:
-        srtin_format = os.path.splitext(srtin)[-1][1:]
+    srtin_format = "srt" if srtin is None else os.path.splitext(srtin)[-1][1:]
     parser = make_subtitle_parser(fmt=srtin_format, caching=True, **args.__dict__)
     return lambda scale_factor: make_subtitle_speech_pipeline(
         **override(args, scale_factor=scale_factor, parser=parser)
@@ -128,7 +123,7 @@ def try_sync(
     sync_was_successful = True
     logger.info(
         "extracting speech segments from %s...",
-        "stdin" if not args.srtin else "subtitles file(s) {}".format(args.srtin),
+        "stdin" if not args.srtin else f"subtitles file(s) {args.srtin}",
     )
     if not args.srtin:
         args.srtin = [None]
@@ -157,8 +152,7 @@ def try_sync(
                     / cast(Pipeline, srt_pipes[0])[-1].num_frames
                 )
                 logger.info(
-                    "inferred frameratio ratio: %.3f"
-                    % inferred_framerate_ratio_from_length
+                    f"inferred frameratio ratio: {inferred_framerate_ratio_from_length:.3f}"
                 )
                 srt_pipes.append(
                     cast(
@@ -268,16 +262,14 @@ def make_reference_pipe(args: argparse.Namespace) -> Pipeline:
 def extract_subtitles_from_reference(args: argparse.Namespace) -> int:
     stream = args.extract_subs_from_stream
     if not stream.startswith("0:s:"):
-        stream = "0:s:{}".format(stream)
+        stream = f"0:s:{stream}"
     elif not stream.startswith("0:") and stream.startswith("s:"):
-        stream = "0:{}".format(stream)
+        stream = f"0:{stream}"
     if not stream.startswith("0:s:"):
         logger.error(
             "invalid stream for subtitle extraction: %s", args.extract_subs_from_stream
         )
-    ffmpeg_args = [
-        ffmpeg_bin_path("ffmpeg", ffmpeg_resources_path=args.ffmpeg_path)
-    ]
+    ffmpeg_args = [ffmpeg_bin_path("ffmpeg", ffmpeg_resources_path=args.ffmpeg_path)]
     ffmpeg_args.extend(
         [
             "-y",
@@ -287,7 +279,7 @@ def extract_subtitles_from_reference(args: argparse.Namespace) -> int:
             "-i",
             args.reference,
             "-map",
-            "{}".format(stream),
+            f"{stream}",
             "-f",
             "srt",
         ]
@@ -314,11 +306,10 @@ def extract_subtitles_from_reference(args: argparse.Namespace) -> int:
 def validate_args(args: argparse.Namespace) -> None:
     if args.vlc_mode:
         logger.setLevel(logging.CRITICAL)
-    if args.reference is None:
-        if args.apply_offset_seconds == 0 or not args.srtin:
-            raise ValueError(
-                "`reference` required unless `--apply-offset-seconds` specified"
-            )
+    if args.reference is None and (args.apply_offset_seconds == 0 or not args.srtin):
+        raise ValueError(
+            "`reference` required unless `--apply-offset-seconds` specified"
+        )
     if args.apply_offset_seconds != 0:
         if not args.srtin:
             args.srtin = [args.reference]
@@ -336,12 +327,11 @@ def validate_args(args: argparse.Namespace) -> None:
         if len(args.srtin) > 1 and args.gui_mode:
             raise ValueError("cannot specify multiple input srt files in GUI mode")
     if (
-        args.make_test_case and not args.gui_mode
+        args.make_test_case and not args.gui_mode and (not args.srtin or args.srtout is None)
     ):  # this validation not necessary for gui mode
-        if not args.srtin or args.srtout is None:
-            raise ValueError(
-                "need to specify input and output srt files for test cases"
-            )
+        raise ValueError(
+            "need to specify input and output srt files for test cases"
+        )
     if args.overwrite_input:
         if args.extract_subs_from_stream is not None:
             raise ValueError(
@@ -398,8 +388,7 @@ def validate_file_permissions(args: argparse.Namespace) -> None:
         npy_savename = os.path.splitext(args.reference)[0] + ".npz"
         if os.path.exists(npy_savename) and not os.access(npy_savename, os.W_OK):
             raise ValueError(
-                "unable to write test case file archive %s (try checking permissions)"
-                % npy_savename
+                f"unable to write test case file archive {npy_savename} (try checking permissions)"
             )
 
 
@@ -450,7 +439,7 @@ def _run_impl(args: argparse.Namespace, result: Dict[str, Any]) -> bool:
 
 
 def validate_and_transform_args(
-    parser_or_args: Union[argparse.ArgumentParser, argparse.Namespace]
+    parser_or_args: Union[argparse.ArgumentParser, argparse.Namespace],
 ) -> Optional[argparse.Namespace]:
     if isinstance(parser_or_args, argparse.Namespace):
         parser = None
@@ -482,7 +471,7 @@ def validate_and_transform_args(
 
 
 def run(
-    parser_or_args: Union[argparse.ArgumentParser, argparse.Namespace]
+    parser_or_args: Union[argparse.ArgumentParser, argparse.Namespace],
 ) -> Dict[str, Any]:
     sync_was_successful = False
     result = {
@@ -561,9 +550,7 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
         "-v",
         "--version",
         action="version",
-        version="{package} {version}".format(
-            package=__package__, version=get_version()
-        ),
+        version=f"{__package__} {get_version()}",
     )
     parser.add_argument(
         "--overwrite-input",
@@ -577,41 +564,40 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
         "--encoding",
         default=DEFAULT_ENCODING,
         help="What encoding to use for reading input subtitles "
-        "(default=%s)." % DEFAULT_ENCODING,
+        f"(default={DEFAULT_ENCODING}).",
     )
     parser.add_argument(
         "--max-subtitle-seconds",
         type=float,
         default=DEFAULT_MAX_SUBTITLE_SECONDS,
         help="Maximum duration for a subtitle to appear on-screen "
-        "(default=%.3f seconds)." % DEFAULT_MAX_SUBTITLE_SECONDS,
+        f"(default={DEFAULT_MAX_SUBTITLE_SECONDS:.3f} seconds).",
     )
     parser.add_argument(
         "--start-seconds",
         type=int,
         default=DEFAULT_START_SECONDS,
-        help="Start time for processing "
-        "(default=%d seconds)." % DEFAULT_START_SECONDS,
+        help=f"Start time for processing (default={DEFAULT_START_SECONDS} seconds).",
     )
     parser.add_argument(
         "--max-offset-seconds",
         type=float,
         default=DEFAULT_MAX_OFFSET_SECONDS,
         help="The max allowed offset seconds for any subtitle segment "
-        "(default=%d seconds)." % DEFAULT_MAX_OFFSET_SECONDS,
+        f"(default={DEFAULT_MAX_OFFSET_SECONDS} seconds).",
     )
     parser.add_argument(
         "--apply-offset-seconds",
         type=float,
         default=DEFAULT_APPLY_OFFSET_SECONDS,
         help="Apply a predefined offset in seconds to all subtitle segments "
-        "(default=%d seconds)." % DEFAULT_APPLY_OFFSET_SECONDS,
+        f"(default={DEFAULT_APPLY_OFFSET_SECONDS} seconds).",
     )
     parser.add_argument(
         "--frame-rate",
         type=int,
         default=DEFAULT_FRAME_RATE,
-        help="Frame rate for audio extraction (default=%d)." % DEFAULT_FRAME_RATE,
+        help=f"Frame rate for audio extraction (default={DEFAULT_FRAME_RATE}).",
     )
     parser.add_argument(
         "--skip-infer-framerate-ratio",
@@ -622,8 +608,7 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
         "--non-speech-label",
         type=float,
         default=DEFAULT_NON_SPEECH_LABEL,
-        help="Label to use for frames detected as non-speech (default=%f)"
-        % DEFAULT_NON_SPEECH_LABEL,
+        help=f"Label to use for frames detected as non-speech (default={DEFAULT_NON_SPEECH_LABEL:f})",
     )
     parser.add_argument(
         "--output-encoding",
@@ -649,7 +634,7 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
         ],
         default=None,
         help="Which voice activity detector to use for speech extraction "
-        "(if using video / audio as a reference, default={}).".format(DEFAULT_VAD),
+        f"(if using video / audio as a reference, default={DEFAULT_VAD}).",
     )
     parser.add_argument(
         "--no-fix-framerate",

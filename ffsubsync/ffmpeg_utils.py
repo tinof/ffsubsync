@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import logging
 import os
 import subprocess
@@ -11,10 +10,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 def subprocess_args(include_stdout=True):
     """Create subprocess arguments for Unix-like systems (Linux/macOS)."""
-    if include_stdout:
-        ret = {"stdout": subprocess.PIPE}
-    else:
-        ret = {}
+    ret = {"stdout": subprocess.PIPE} if include_stdout else {}
 
     ret.update(
         {

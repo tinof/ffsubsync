@@ -5,6 +5,7 @@ All package configuration is now in pyproject.toml (PEP 621).
 """
 
 from setuptools import setup
+
 import versioneer
 
 setup(

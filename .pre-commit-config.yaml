@@ -1,0 +1,52 @@
+# Pre-commit configuration to match CI/CD pipeline requirements
+# This ensures the same Ruff rules that run in CI/CD also run locally
+
+repos:
+  # Ruff linting and formatting - matches CI/CD pipeline
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Use the same version as in your CI/CD or latest stable
+    rev: v0.8.4
+    hooks:
+      # Ruff linting check (matches: ruff check . --output-format=github)
+      - id: ruff
+        name: Ruff linting
+        description: Run Ruff linting checks
+        args: [--fix, --exit-non-zero-on-fix]
+
+      # Ruff formatting check (matches: ruff format --check .)
+      - id: ruff-format
+        name: Ruff formatting
+        description: Run Ruff formatting checks
+
+  # Additional useful hooks for a professional workflow
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      # Prevent committing large files
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+
+      # Check for merge conflict markers
+      - id: check-merge-conflict
+
+      # Check YAML syntax
+      - id: check-yaml
+        exclude: '^\.github/workflows/.*\.yml$'  # GitHub Actions may use non-standard YAML
+
+      # Check TOML syntax (for pyproject.toml)
+      - id: check-toml
+
+      # Ensure files end with newline
+      - id: end-of-file-fixer
+        exclude: '\.egg-info/.*'
+
+      # Remove trailing whitespace
+      - id: trailing-whitespace
+        exclude: '\.egg-info/.*'
+
+      # Check for private key files
+      - id: detect-private-key
+
+# Configuration for pre-commit
+default_stages: [pre-commit]
+fail_fast: false  # Run all hooks even if one fails

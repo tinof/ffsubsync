@@ -1,0 +1,23 @@
+1
+00:00:02,178 --> 00:00:03,416
+Previously on "Your favorite TV show..."
+
+2
+00:00:03,828 --> 00:00:06,549
+Oh hi, Mark.
+
+3
+00:00:06,653 --> 00:00:08,062
+You are tearing me apart, Lisa!
+
+4
+00:00:08,500 --> 00:00:10,200
+I did not hit her, it's not true!
+
+5
+00:00:10,500 --> 00:00:12,000
+It's bullshit! I did not hit her!
+
+6
+00:00:12,200 --> 00:00:13,500
+I did not! Oh hi, Mark.

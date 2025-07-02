@@ -1,0 +1,7 @@
+sync_tests:
+  - reference: "reference.srt"
+    unsynchronized: "unsynchronized.srt"
+    synchronized: "synchronized.srt"
+    should_detect_encoding: "ASCII"
+    extra_args:
+      max-offset-seconds: 60

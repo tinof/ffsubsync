@@ -65,12 +65,12 @@ pip install pipx
 
 You can also install using pip (requires Python >= 3.8):
 ~~~
-pip install ffsubsync
+pip install git+https://github.com/tinof/ffsubsync@latest
 ~~~
 
 For the latest development version:
 ~~~
-pipx install git+https://github.com/smacke/ffsubsync@latest
+pipx install git+https://github.com/tinof/ffsubsync@latest
 ~~~
 
 **Note:** This tool supports Linux and macOS only. Windows is not supported.

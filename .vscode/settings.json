@@ -1,0 +1,25 @@
+{
+  // Python and Ruff configuration for ffsubsync project
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll.ruff": "explicit",
+      "source.organizeImports.ruff": "explicit"
+    }
+  },
+
+  // Ruff native server configuration (migrated from ruff-lsp)
+  "ruff.nativeServer": "on",
+  "ruff.configurationPreference": "filesystemFirst",
+  "ruff.importStrategy": "fromEnvironment",
+
+  // Ensure Ruff is enabled and other linters are disabled to avoid conflicts
+  "python.linting.enabled": false,
+  "python.linting.pylintEnabled": false,
+  "python.linting.flake8Enabled": false,
+  "python.linting.mypyEnabled": false,
+
+  // Optional: Enable Ruff logging for debugging (remove after confirming it works)
+  "ruff.logLevel": "info"
+}

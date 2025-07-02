@@ -10,4 +10,4 @@ setuptools
 srt>=3.0.0
 tqdm
 typing_extensions
-webrtcvad
+webrtcvad-wheels

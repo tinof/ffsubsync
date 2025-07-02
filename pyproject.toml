@@ -35,7 +35,7 @@ classifiers = [
 ]
 requires-python = ">=3.9"
 dependencies = [
-    "auditok==0.1.5",
+    "auditok>=0.3.0",
     "chardet",
     "charset_normalizer",
     "faust-cchardet",
@@ -47,7 +47,7 @@ dependencies = [
     "srt>=3.0.0",
     "tqdm",
     "typing_extensions",
-    "webrtcvad",
+    "webrtcvad-wheels",
 ]
 
 [project.optional-dependencies]

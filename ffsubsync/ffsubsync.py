@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Callable, Optional, Union, cast
 
 import numpy as np
 
@@ -38,7 +38,7 @@ from ffsubsync.version import get_version
 logger: logging.Logger = logging.getLogger(__name__)
 
 
-def override(args: argparse.Namespace, **kwargs: Any) -> Dict[str, Any]:
+def override(args: argparse.Namespace, **kwargs: Any) -> dict[str, Any]:
     args_dict = dict(args.__dict__)
     args_dict.update(kwargs)
     return args_dict
@@ -102,7 +102,7 @@ def get_srt_pipe_maker(
     )
 
 
-def get_framerate_ratios_to_try(args: argparse.Namespace) -> List[Optional[float]]:
+def get_framerate_ratios_to_try(args: argparse.Namespace) -> list[Optional[float]]:
     if args.no_fix_framerate:
         return []
     else:
@@ -117,7 +117,7 @@ def get_framerate_ratios_to_try(args: argparse.Namespace) -> List[Optional[float
 
 
 def try_sync(
-    args: argparse.Namespace, reference_pipe: Optional[Pipeline], result: Dict[str, Any]
+    args: argparse.Namespace, reference_pipe: Optional[Pipeline], result: dict[str, Any]
 ) -> bool:
     result["sync_was_successful"] = False
     sync_was_successful = True
@@ -182,7 +182,7 @@ def try_sync(
             logger.info("score: %.3f", best_score)
             logger.info("offset seconds: %.3f", offset_seconds)
             logger.info("framerate scale factor: %.3f", scale_step.scale_factor)
-            output_steps: List[Tuple[str, TransformerMixin]] = [
+            output_steps: list[tuple[str, TransformerMixin]] = [
                 ("shift", SubtitleShifter(offset_seconds))
             ]
             if args.merge_with_reference:
@@ -394,7 +394,7 @@ def validate_file_permissions(args: argparse.Namespace) -> None:
 
 def _setup_logging(
     args: argparse.Namespace,
-) -> Tuple[Optional[str], Optional[logging.FileHandler]]:
+) -> tuple[Optional[str], Optional[logging.FileHandler]]:
     log_handler = None
     log_path = None
     if args.make_test_case or args.log_dir_path is not None:
@@ -411,7 +411,7 @@ def _npy_savename(args: argparse.Namespace) -> str:
     return os.path.splitext(args.reference)[0] + ".npz"
 
 
-def _run_impl(args: argparse.Namespace, result: Dict[str, Any]) -> bool:
+def _run_impl(args: argparse.Namespace, result: dict[str, Any]) -> bool:
     if args.extract_subs_from_stream is not None:
         result["retval"] = extract_subtitles_from_reference(args)
         return True
@@ -472,7 +472,7 @@ def validate_and_transform_args(
 
 def run(
     parser_or_args: Union[argparse.ArgumentParser, argparse.Namespace],
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     sync_was_successful = False
     result = {
         "retval": 0,

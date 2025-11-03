@@ -4,7 +4,7 @@ import subprocess
 import sys
 from contextlib import contextmanager
 from datetime import timedelta
-from typing import Callable, Dict, List, Optional, Union, cast
+from typing import Callable, Optional, Union, cast
 
 import ffmpeg
 import numpy as np
@@ -231,7 +231,7 @@ def _make_tenvad_detector(
         # View as int16 without copying
         pcm = np.frombuffer(asegment, dtype=np.int16)
         n = len(pcm)
-        media_bstring: List[float] = []
+        media_bstring: list[float] = []
         # Process in hop-sized chunks
         for start in range(0, n, frames_per_window):
             stop = min(start + frames_per_window, n)
@@ -310,7 +310,7 @@ class VideoSpeechTransformer(TransformerMixin):
         embedded_subs_times = []
         if self.ref_stream is None:
             # check first 5; should cover 99% of movies
-            streams_to_try: List[str] = list(map("0:s:{}".format, range(5)))
+            streams_to_try: list[str] = list(map("0:s:{}".format, range(5)))
         else:
             streams_to_try = [self.ref_stream]
         for stream in streams_to_try:
@@ -409,7 +409,7 @@ class VideoSpeechTransformer(TransformerMixin):
             logger.warning(e)
             total_duration = None
         detector = self._build_detector()
-        media_bstring: List[np.ndarray] = []
+        media_bstring: list[np.ndarray] = []
         ffmpeg_args = [
             ffmpeg_bin_path("ffmpeg", ffmpeg_resources_path=self.ffmpeg_path)
         ]
@@ -454,9 +454,12 @@ class VideoSpeechTransformer(TransformerMixin):
 
         assert redirect_stderr is not None
         pbar_output = io.StringIO()
-        with redirect_stderr(pbar_output), tqdm.tqdm(
-            total=total_duration, disable=self.vlc_mode, **tqdm_extra_args
-        ) as pbar:
+        with (
+            redirect_stderr(pbar_output),
+            tqdm.tqdm(
+                total=total_duration, disable=self.vlc_mode, **tqdm_extra_args
+            ) as pbar,
+        ):
             while True:
                 in_bytes = process.stdout.read(frames_per_window * windows_per_buffer)
                 if not in_bytes:
@@ -490,7 +493,7 @@ class VideoSpeechTransformer(TransformerMixin):
         return self.video_speech_results_
 
 
-_PAIRED_NESTER: Dict[str, str] = {
+_PAIRED_NESTER: dict[str, str] = {
     "(": ")",
     "{": "}",
     "[": "]",
@@ -525,7 +528,7 @@ class SubtitleSpeechTransformer(TransformerMixin, ComputeSpeechFrameBoundariesMi
         self.subtitle_speech_results_: Optional[np.ndarray] = None
         self.max_time_: Optional[int] = None
 
-    def fit(self, subs: List[GenericSubtitle], *_) -> "SubtitleSpeechTransformer":
+    def fit(self, subs: list[GenericSubtitle], *_) -> "SubtitleSpeechTransformer":
         max_time = 0
         for sub in subs:
             max_time = max(max_time, sub.end.total_seconds())

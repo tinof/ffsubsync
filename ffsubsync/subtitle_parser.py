@@ -1,6 +1,6 @@
 import logging
 from datetime import timedelta
-from typing import Any, List, Optional, cast
+from typing import Any, Optional, cast
 
 try:
     import cchardet
@@ -35,7 +35,7 @@ def _preprocess_subs(
     max_subtitle_seconds: Optional[int] = None,
     start_seconds: int = 0,
     tolerant: bool = True,
-) -> List[GenericSubtitle]:
+) -> list[GenericSubtitle]:
     subs_list = []
     start_time = timedelta(seconds=start_seconds)
     max_duration = timedelta(days=1)

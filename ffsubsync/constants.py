@@ -1,10 +1,8 @@
-from typing import List, Tuple
-
 SUBSYNC_RESOURCES_ENV_MAGIC: str = "ffsubsync_resources_xj48gjdkl340"
 
 SAMPLE_RATE: int = 100
 
-FRAMERATE_RATIOS: List[float] = [24.0 / 23.976, 25.0 / 23.976, 25.0 / 24.0]
+FRAMERATE_RATIOS: list[float] = [24.0 / 23.976, 25.0 / 23.976, 25.0 / 24.0]
 
 DEFAULT_FRAME_RATE: int = 48000
 DEFAULT_NON_SPEECH_LABEL: float = 0.0
@@ -16,7 +14,7 @@ DEFAULT_VAD: str = "subs_then_tenvad"
 DEFAULT_MAX_OFFSET_SECONDS: int = 60
 DEFAULT_APPLY_OFFSET_SECONDS: int = 0
 
-SUBTITLE_EXTENSIONS: Tuple[str, ...] = ("srt", "ass", "ssa", "sub")
+SUBTITLE_EXTENSIONS: tuple[str, ...] = ("srt", "ass", "ssa", "sub")
 
 GITHUB_DEV_USER: str = "smacke"
 PROJECT_NAME: str = "FFsubsync"

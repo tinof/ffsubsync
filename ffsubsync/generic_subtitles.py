@@ -2,8 +2,9 @@ import copy
 import logging
 import os
 import sys
+from collections.abc import Iterator
 from datetime import timedelta
-from typing import Any, Dict, Iterator, List, Optional, cast
+from typing import Any, Optional, cast
 
 import pysubs2
 import srt
@@ -71,19 +72,19 @@ class GenericSubtitle:
 
 
 class GenericSubtitlesFile:
-    def __init__(self, subs: List[GenericSubtitle], *_, **kwargs: Any):
+    def __init__(self, subs: list[GenericSubtitle], *_, **kwargs: Any):
         sub_format: str = cast(str, kwargs.pop("sub_format", None))
         if sub_format is None:
             raise ValueError("format must be specified")
         encoding: str = cast(str, kwargs.pop("encoding", None))
         if encoding is None:
             raise ValueError("encoding must be specified")
-        self.subs_: List[GenericSubtitle] = subs
+        self.subs_: list[GenericSubtitle] = subs
         self._sub_format: str = sub_format
         self._encoding: str = encoding
-        self._styles: Optional[Dict[str, pysubs2.SSAStyle]] = kwargs.pop("styles", None)
-        self._fonts_opaque: Optional[Dict[str, Any]] = kwargs.pop("fonts_opaque", None)
-        self._info: Optional[Dict[str, str]] = kwargs.pop("info", None)
+        self._styles: Optional[dict[str, pysubs2.SSAStyle]] = kwargs.pop("styles", None)
+        self._fonts_opaque: Optional[dict[str, Any]] = kwargs.pop("fonts_opaque", None)
+        self._info: Optional[dict[str, str]] = kwargs.pop("info", None)
         self._fps: Optional[float] = kwargs.pop("fps", None)
 
     def set_encoding(self, encoding: str) -> "GenericSubtitlesFile":
@@ -101,7 +102,7 @@ class GenericSubtitlesFile:
         return iter(self.subs_)
 
     def clone_props_for_subs(
-        self, new_subs: List[GenericSubtitle]
+        self, new_subs: list[GenericSubtitle]
     ) -> "GenericSubtitlesFile":
         return GenericSubtitlesFile(
             new_subs,

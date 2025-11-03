@@ -1,6 +1,6 @@
 import logging
 import math
-from typing import List, Optional, Tuple, Type, Union
+from typing import Optional, Union
 
 import numpy as np
 
@@ -68,7 +68,7 @@ class FFTAligner(TransformerMixin):
         self.get_score_ = get_score
         return self
 
-    def transform(self, *_) -> Union[int, Tuple[float, int]]:
+    def transform(self, *_) -> Union[int, tuple[float, int]]:
         if self.get_score_:
             return self.best_score_, self.best_offset_
         else:
@@ -78,7 +78,7 @@ class FFTAligner(TransformerMixin):
 class MaxScoreAligner(TransformerMixin):
     def __init__(
         self,
-        base_aligner: Union[FFTAligner, Type[FFTAligner]],
+        base_aligner: Union[FFTAligner, type[FFTAligner]],
         srtin: Optional[str] = None,
         sample_rate=None,
         max_offset_seconds=None,
@@ -95,7 +95,7 @@ class MaxScoreAligner(TransformerMixin):
         else:
             self.base_aligner = base_aligner
         self.max_offset_seconds: Optional[int] = max_offset_seconds
-        self._scores: List[Tuple[Tuple[float, int], Pipeline]] = []
+        self._scores: list[tuple[tuple[float, int], Pipeline]] = []
 
     def fit_gss(self, refstring, subpipe_maker):
         def opt_func(framerate_ratio, is_last_iter):
@@ -118,7 +118,7 @@ class MaxScoreAligner(TransformerMixin):
         return self
 
     def fit(
-        self, refstring, subpipes: Union[Pipeline, List[Pipeline]]
+        self, refstring, subpipes: Union[Pipeline, list[Pipeline]]
     ) -> "MaxScoreAligner":
         if not isinstance(subpipes, list):
             subpipes = [subpipes]
@@ -140,7 +140,7 @@ class MaxScoreAligner(TransformerMixin):
             )
         return self
 
-    def transform(self, *_) -> Tuple[Tuple[float, float], Pipeline]:
+    def transform(self, *_) -> tuple[tuple[float, float], Pipeline]:
         scores = self._scores
         if self.max_offset_samples is not None:
             scores = list(

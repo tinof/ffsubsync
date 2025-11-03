@@ -38,7 +38,7 @@ dependencies = [
     "auditok>=0.3.0",
     "chardet",
     "charset_normalizer",
-    "faust-cchardet",
+    "faust-cchardet;python_version<'3.13'",
     "ffmpeg-python",
     "numpy>=1.12.0",
     "pysubs2>=1.2.0",

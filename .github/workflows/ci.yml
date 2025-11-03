@@ -28,20 +28,15 @@ jobs:
         with:
           python-version: '3.11'  # Use a stable Python version for linting
 
-      - name: Install Ruff
+      - name: Install pre-commit
         run: |
           python -m pip install --upgrade pip
-          pip install ruff
+          pip install pre-commit
 
-      - name: Run Ruff linting
+      - name: Run pre-commit hooks (repo-wide, push stage)
         run: |
-          echo "Running Ruff linting checks..."
-          ruff check . --output-format=github
-
-      - name: Run Ruff formatting check
-        run: |
-          echo "Checking code formatting with Ruff..."
-          ruff format --check .
+          echo "Running pre-commit (push stage) checks..."
+          pre-commit run --all-files --hook-stage push
 
   # pipx Installation Testing
   pipx-installation:

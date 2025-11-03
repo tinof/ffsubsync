@@ -7,7 +7,8 @@ This document outlines the professional development workflow for this project to
 1. **Install pre-commit hooks** (one-time setup):
    ```bash
    pip install pre-commit
-   pre-commit install
+   # Install both commit and push hooks so Ruff runs locally before push
+   pre-commit install --hook-type pre-commit --hook-type pre-push
    ```
 
 2. **Before making changes**, ensure your environment is ready:
@@ -51,6 +52,9 @@ You can run these commands manually at any time:
 ```bash
 # Run all pre-commit hooks on all files
 pre-commit run --all-files
+
+# Run the same checks that CI runs on push (repo-wide)
+pre-commit run --all-files --hook-stage push
 
 # Run only Ruff linting
 ruff check .
@@ -112,7 +116,7 @@ git commit --no-verify -m "Emergency commit"
 
 The GitHub Actions pipeline runs the same checks as your local pre-commit hooks:
 
-1. **Code Quality** (Ruff linting and formatting)
+1. **Code Quality** (pre-commit: Ruff linting and formatting)
 2. **pipx Installation Testing** (Linux/macOS, Python 3.9-3.13)
 3. **Unit Tests** (Linux/macOS, Python 3.9-3.13)
 4. **Integration Tests** (Ubuntu only, Python 3.10-3.11)

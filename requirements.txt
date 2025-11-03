@@ -1,4 +1,3 @@
-auditok==0.1.5
 chardet
 charset_normalizer
 faust-cchardet;python_version<'3.13'
@@ -13,3 +12,5 @@ typing_extensions
 webrtcvad-wheels
 # Optional: TEN VAD backend (install via extra)
 # ten-vad>=1.0
+# Optional: Auditok backend (install via extra)
+# auditok<0.3.0

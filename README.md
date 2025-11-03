@@ -164,7 +164,8 @@ If the sync fails, the following recourses are available:
   sometimes work better in the case of low-quality audio than WebRTC's VAD.
   Auditok does not specifically detect voice, but instead detects all audio;
   this property can yield suboptimal syncing behavior when a proper VAD can
-  work well, but can be effective in some cases.
+  work well, but can be effective in some cases. Install support via
+  `pip install ffsubsync[auditok]` (we use `auditok<0.3.0` to avoid PyAudio builds).
 
 If the sync still fails, consider trying one of the following similar tools:
 - [sc0ty/subsync](https://github.com/sc0ty/subsync): does speech-to-text and looks for matching word morphemes
@@ -188,8 +189,9 @@ The synchronization algorithm operates in 3 steps:
 2. For each 10ms window, determine whether that window contains speech.  This
    is trivial to do for subtitles (we just determine whether any subtitle is
    "on" during each time window); for the audio stream, ffsubsync uses the
-   [TEN VAD](https://github.com/TEN-framework/ten-vad) backend by default, but
-   you can switch to WebRTC (`--vad=webrtc`) or auditok (`--vad=auditok`).
+   [TEN VAD](https://github.com/TEN-framework/ten-vad) backend by default (if installed), but
+   you can switch to WebRTC (`--vad=webrtc`) or auditok (`--vad=auditok`, install with
+   `pip install ffsubsync[auditok]`). If TEN VAD is not installed, WebRTC is used.
 3. Now we have two binary strings: one for the subtitles, and one for the
    video.  Try to align these strings by matching 0's with 0's and 1's with
    1's. We score these alignments as (# video 1's matched w/ subtitle 1's) - (#

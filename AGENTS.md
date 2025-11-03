@@ -119,8 +119,8 @@ binary strings -> FFTAligner -> time offset -> SubtitleShifter -> synchronized o
 
 Backends supported:
 - `webrtcvad-wheels` (default path: `--vad=webrtc`): Voice-specific detection
-- `auditok` (`--vad=auditok`): Audio activity detection (better for low-quality audio)
-- `TEN VAD` (default; `--vad=tenvad` or `--vad=subs_then_tenvad`): Low-latency, lightweight, high-accuracy streaming VAD. Requires 16 kHz audio; ffsubsync auto-sets `--frame-rate` to 16000 when selected. Installed by default (dependency: `pip install ten-vad`).
+- `auditok` (`--vad=auditok`) [optional extra]: Energy/audio activity detector. Install with `pip install ffsubsync[auditok]`. Note: we keep `auditok<0.3.0` to avoid the newer PyAudio/portaudio build requirement on CI.
+- `TEN VAD` (`--vad=tenvad` or `--vad=subs_then_tenvad`) [optional extra]: Low-latency, lightweight, high-accuracy streaming VAD. Requires 16 kHz audio; ffsubsync auto-sets `--frame-rate` to 16000 when selected. Install with `pip install ffsubsync[tenvad]`. If TEN VAD is not installed, the code falls back to WebRTC.
 
 ## Code Quality Standards
 
@@ -145,11 +145,12 @@ All stages must pass for PR approval.
 
 ## Dependency Management
 
-**Runtime Dependencies** (`requirements.txt` via `pyproject.toml`):
+**Runtime Dependencies** (`pyproject.toml`):
 - `ffmpeg-python`: FFmpeg wrapper for audio extraction
 - `numpy`: FFT computations and array processing
 - `srt`, `pysubs2`: Subtitle format parsing
-- `webrtcvad-wheels`, `auditok`, `ten-vad`: Voice activity detection
+- `webrtcvad-wheels`: Voice activity detection (default)
+- Optional VAD backends: `auditok` (install with extra `auditok`), `ten-vad` (install with extra `tenvad`)
 - `rich`, `tqdm`: CLI output formatting
 - `chardet`, `charset_normalizer`, `faust-cchardet`: Character encoding detection
 

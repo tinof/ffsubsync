@@ -35,7 +35,6 @@ classifiers = [
 ]
 requires-python = ">=3.9"
 dependencies = [
-    "auditok>=0.3.0",
     "chardet",
     "charset_normalizer",
     "faust-cchardet;python_version<'3.13'",
@@ -62,6 +61,13 @@ dev = [
     "twine",
     "types-requests",
     "versioneer",
+]
+auditok = [
+    # Keep auditok optional to avoid PyAudio/portaudio build requirements
+    # The 0.3.x series introduces a hard dependency on PyAudio which fails
+    # to build on CI runners without system headers. Older versions work
+    # for our usage (energy-based activity detection).
+    "auditok<0.3.0",
 ]
 tenvad = [
     # TEN VAD Python bindings (requires 16 kHz input)
@@ -101,8 +107,8 @@ extend-exclude = '(^/versioneer|_version)\.py'
 [tool.ruff]
 # Same line length as Black for consistency
 line-length = 88
-# Target Python 3.8+ to match project requirements
-target-version = "py38"
+# Target Python 3.9+ to match project requirements
+target-version = "py39"
 
 [tool.ruff.lint]
 # Enable a comprehensive set of rules

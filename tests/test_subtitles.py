@@ -123,18 +123,22 @@ def test_max_time_found():
 
 
 def test_microdvd_roundtrip(tmp_path):
-    src = 'test-data/Revolution.S01E02.Chained.Heat.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-EPSiLON.fi.sub'
-    parser = GenericSubtitleParser(fmt='sub', encoding='latin-1')
+    src = "test-data/Revolution.S01E02.Chained.Heat.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-EPSiLON.fi.sub"
+    parser = GenericSubtitleParser(fmt="sub", encoding="latin-1")
     parser.fit(src)
     subs = parser.subs_
-    out_path = tmp_path / 'roundtrip.sub'
+    out_path = tmp_path / "roundtrip.sub"
     subs.write_file(str(out_path))
 
-    parser_roundtrip = GenericSubtitleParser(fmt='sub', encoding='latin-1')
+    parser_roundtrip = GenericSubtitleParser(fmt="sub", encoding="latin-1")
     parser_roundtrip.fit(str(out_path))
 
     assert len(parser_roundtrip.subs_) == len(subs)
     assert parser_roundtrip.subs_[0].content == subs.subs_[0].content
-    assert abs(
-        parser_roundtrip.subs_[0].start.total_seconds() - subs.subs_[0].start.total_seconds()
-    ) < 1e-6
+    assert (
+        abs(
+            parser_roundtrip.subs_[0].start.total_seconds()
+            - subs.subs_[0].start.total_seconds()
+        )
+        < 1e-6
+    )

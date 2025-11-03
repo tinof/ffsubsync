@@ -94,7 +94,7 @@ class Pipeline:
         self._validate_steps()
 
     def _validate_steps(self):
-        names, estimators = zip(*self.steps)
+        estimators = [estimator for _, estimator in self.steps]
 
         # validate estimators
         transformers = estimators[:-1]
@@ -160,7 +160,7 @@ class Pipeline:
                 raise ValueError("Pipeline slicing only supports a step of 1")
             return self.__class__(self.steps[ind])
         try:
-            name, est = self.steps[ind]
+            _, est = self.steps[ind]
         except TypeError:
             # Not an int, try get step by name
             return self.named_steps[ind]
@@ -182,7 +182,7 @@ class Pipeline:
     def _log_message(self, step_idx):
         if not self.verbose:
             return None
-        name, step = self.steps[step_idx]
+        name, _ = self.steps[step_idx]
 
         return f"(step {step_idx + 1} of {len(self.steps)}) Processing {name}"
 

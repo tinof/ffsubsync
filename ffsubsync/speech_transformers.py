@@ -139,7 +139,6 @@ def _make_webrtcvad_detector(
 
     def _detect(asegment: bytes) -> np.ndarray:
         media_bstring = []
-        failures = 0
         for start in range(0, len(asegment) // bytes_per_frame, frames_per_window):
             stop = min(start + frames_per_window, len(asegment) // bytes_per_frame)
             try:
@@ -178,7 +177,6 @@ def _make_silero_detector(
         asegment = np.frombuffer(asegment, np.int16).astype(np.float32) / (1 << 15)
         asegment = torch.FloatTensor(asegment)
         media_bstring = []
-        failures = 0
         for start in range(0, len(asegment) // bytes_per_frame, frames_per_window):
             stop = min(start + frames_per_window, len(asegment))
             try:
@@ -229,7 +227,6 @@ def _make_tenvad_detector(
     threshold = 0.5
     ten = TenVad(frames_per_window, threshold)
 
-
     def _detect(asegment: bytes) -> np.ndarray:
         # View as int16 without copying
         pcm = np.frombuffer(asegment, dtype=np.int16)
@@ -245,7 +242,7 @@ def _make_tenvad_detector(
                 padded[: len(chunk)] = chunk
                 chunk = padded
             try:
-                prob, flag = ten.process(chunk)  # returns (probability, 0/1)
+                prob, _ = ten.process(chunk)  # returns (probability, 0/1)
             except Exception:  # pragma: no cover
                 # Be conservative on exception; treat as non-speech but not certain
                 prob = 0.0

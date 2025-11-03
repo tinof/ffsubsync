@@ -11,4 +11,5 @@ srt>=3.0.0
 tqdm
 typing_extensions
 webrtcvad-wheels
-ten-vad>=1.0
+# Optional: TEN VAD backend (install via extra)
+# ten-vad>=1.0

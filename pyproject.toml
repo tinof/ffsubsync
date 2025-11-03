@@ -48,7 +48,6 @@ dependencies = [
     "tqdm",
     "typing_extensions",
     "webrtcvad-wheels",
-    "ten-vad>=1.0",
 ]
 
 [project.optional-dependencies]

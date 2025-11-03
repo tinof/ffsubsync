@@ -123,10 +123,24 @@ def test_max_time_found():
 
 
 def test_microdvd_roundtrip(tmp_path):
-    src = "test-data/Revolution.S01E02.Chained.Heat.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-EPSiLON.fi.sub"
+    # Create a minimal MicroDVD sample with an explicit FPS declaration
+    # First line encodes FPS per MicroDVD convention: {1}{1}<fps>
+    fps = 25.0
+    microdvd_text = "\n".join(
+        [
+            f"{{1}}{{1}}{fps}",
+            "{0}{24}Hello|World",
+            "{30}{60}Second line",
+            "",
+        ]
+    )
+    src_path = tmp_path / "sample.sub"
+    src_path.write_text(microdvd_text, encoding="latin-1")
+
     parser = GenericSubtitleParser(fmt="sub", encoding="latin-1")
-    parser.fit(src)
+    parser.fit(str(src_path))
     subs = parser.subs_
+
     out_path = tmp_path / "roundtrip.sub"
     subs.write_file(str(out_path))
 

@@ -50,13 +50,19 @@ sudo dnf install ffmpeg
 
 ### Recommended Installation (pipx)
 
-The recommended way to install ffsubsync is using [pipx](https://pypa.github.io/pipx/), which installs the package in an isolated environment and makes the CLI commands globally available:
+The recommended way to install ffsubsync is using [pipx](https://pypa.github.io/pipx/), which installs the package in an isolated environment and makes the CLI commands globally available.
+
+TEN VAD is the default VAD in ffsubsync, but it is an optional extra to avoid build issues in minimal environments. To install with TEN VAD enabled by default, use the `tenvad` extra:
 
 ~~~
-pipx install ffsubsync
+pipx install "ffsubsync[tenvad]"
 ~~~
 
-This installs the default TEN VAD backend automatically (dependency: `ten-vad`).
+If you already installed without the extra, you can add TEN VAD later:
+
+~~~
+pipx inject ffsubsync ten-vad
+~~~
 
 If you don't have pipx installed, you can install it first:
 ~~~
@@ -66,14 +72,30 @@ pip install pipx
 ### Alternative Installation (pip)
 
 You can also install using pip (requires Python >= 3.8):
+
+From PyPI with TEN VAD:
 ~~~
-pip install git+https://github.com/tinof/ffsubsync@latest
+pip install "ffsubsync[tenvad]"
 ~~~
 
-For the latest development version:
+From a local wheel you built:
 ~~~
-pipx install git+https://github.com/tinof/ffsubsync@latest
+pipx install "ffsubsync[tenvad] @ file://$PWD/dist/ffsubsync-<version>.whl"
 ~~~
+
+From the latest development branch via Git (pip or pipx both work):
+~~~
+pip install "ffsubsync[tenvad] @ git+https://github.com/tinof/ffsubsync@latest"
+pipx install "ffsubsync[tenvad] @ git+https://github.com/tinof/ffsubsync@latest"
+~~~
+
+If you choose to install without TEN VAD (no extras), ffsubsync will fall back to the WebRTC VAD automatically.
+
+### Verifying TEN VAD is active
+
+- Run once with a video; you should see a log like:
+  `TEN VAD selected: overriding frame_rate ... 16000`.
+- You can also explicitly select it: `--vad=tenvad` or `--vad=subs_then_tenvad`.
 
 **Note:** This tool supports Linux and macOS only. Windows is not supported.
 

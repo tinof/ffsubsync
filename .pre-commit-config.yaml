@@ -12,26 +12,26 @@ repos:
         name: Ruff linting
         description: Run Ruff linting checks
         # On commit, auto-fix and block commit if fixes were needed
-        stages: [commit]
+        stages: [pre-commit]
         args: [--fix, --exit-non-zero-on-fix]
 
       # Ruff formatting check (matches: ruff format --check .)
       - id: ruff-format
         name: Ruff formatting
         description: Run Ruff formatting checks
-        stages: [commit]
+        stages: [pre-commit]
 
       # Run Ruff formatting across the entire repo before push (no fixes).
       - id: ruff-format
-        name: Ruff formatting (push, repo-wide)
-        stages: [push]
+        name: Ruff formatting (pre-push, repo-wide)
+        stages: [pre-push]
         pass_filenames: false
         args: [--check, .]
 
       # Run Ruff linting across the entire repo before push (no fixes).
       - id: ruff
-        name: Ruff linting (push, repo-wide)
-        stages: [push]
+        name: Ruff linting (pre-push, repo-wide)
+        stages: [pre-push]
         pass_filenames: false
         args: [.]
 

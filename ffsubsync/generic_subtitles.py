@@ -84,6 +84,7 @@ class GenericSubtitlesFile:
         self._styles: Optional[Dict[str, pysubs2.SSAStyle]] = kwargs.pop("styles", None)
         self._fonts_opaque: Optional[Dict[str, Any]] = kwargs.pop("fonts_opaque", None)
         self._info: Optional[Dict[str, str]] = kwargs.pop("info", None)
+        self._fps: Optional[float] = kwargs.pop("fps", None)
 
     def set_encoding(self, encoding: str) -> "GenericSubtitlesFile":
         if encoding != "same":
@@ -109,6 +110,7 @@ class GenericSubtitlesFile:
             styles=self._styles,
             fonts_opaque=self._fonts_opaque,
             info=self._info,
+            fps=self._fps,
         )
 
     def gen_raw_resolved_subs(self):
@@ -128,22 +130,42 @@ class GenericSubtitlesFile:
         else:
             out_format = os.path.splitext(fname)[-1][1:]
         subs = list(self.gen_raw_resolved_subs())
-        if self._sub_format in ("ssa", "ass", "vtt"):
+
+        def _build_ssa_from_events(events):
             ssaf = pysubs2.SSAFile()
-            ssaf.events = subs
+            ssaf.events = events
             if self._styles is not None:
                 ssaf.styles = self._styles
             if self._info is not None:
                 ssaf.info = self._info
             if self._fonts_opaque is not None:
                 ssaf.fonts_opaque = self._fonts_opaque
-            to_write = ssaf.to_string(out_format)
-        elif self._sub_format == "srt" and out_format in ("ssa", "ass", "vtt"):
-            to_write = pysubs2.SSAFile.from_string(srt.compose(subs)).to_string(
-                out_format
-            )
-        elif out_format == "srt":
-            to_write = srt.compose(subs)
+            if self._fps is not None:
+                ssaf.fps = self._fps
+            return ssaf
+
+        to_write: str
+        if out_format == "srt":
+            if subs and isinstance(subs[0], pysubs2.SSAEvent):
+                ssaf = _build_ssa_from_events(subs)
+                to_write = ssaf.to_string("srt")
+            else:
+                to_write = srt.compose(subs) if subs else ""
+        elif out_format in ("ssa", "ass", "vtt", "sub"):
+            if subs and isinstance(subs[0], pysubs2.SSAEvent):
+                ssaf = _build_ssa_from_events(subs)
+            else:
+                ssaf = _build_ssa_from_events(
+                    pysubs2.SSAFile.from_string(srt.compose(subs)).events
+                    if subs
+                    else []
+                )
+            if out_format == "sub":
+                fps = getattr(ssaf, "fps", None) or self._fps or 23.976
+                ssaf.fps = fps
+                to_write = ssaf.to_string("microdvd", fps=fps)
+            else:
+                to_write = ssaf.to_string(out_format)
         else:
             raise NotImplementedError(f"unsupported output format: {out_format}")
 

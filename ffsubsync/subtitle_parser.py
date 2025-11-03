@@ -116,7 +116,10 @@ class GenericSubtitleParser(SubsMixin, TransformerMixin):
                         decoded_subs, ignore_errors=not self._strict
                     )
                 elif self.sub_format in ("ass", "ssa", "sub", "vtt"):
-                    parsed_subs = pysubs2.SSAFile.from_string(decoded_subs)
+                    extra_parse_kwargs = {}
+                    if self.sub_format == "sub":
+                        extra_parse_kwargs["strict_fps_inference"] = False
+                    parsed_subs = pysubs2.SSAFile.from_string(decoded_subs, **extra_parse_kwargs)
                 else:
                     raise NotImplementedError(f"unsupported format: {self.sub_format}")
                 extra_generic_subtitle_file_kwargs = {}
@@ -129,6 +132,7 @@ class GenericSubtitleParser(SubsMixin, TransformerMixin):
                             "info": parsed_subs.info
                             if not self._skip_ssa_info
                             else None,
+                            "fps": getattr(parsed_subs, "fps", None),
                         }
                     )
                 self.subs_ = GenericSubtitlesFile(

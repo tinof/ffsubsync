@@ -56,6 +56,8 @@ The recommended way to install ffsubsync is using [pipx](https://pypa.github.io/
 pipx install ffsubsync
 ~~~
 
+This installs the default TEN VAD backend automatically (dependency: `ten-vad`).
+
 If you don't have pipx installed, you can install it first:
 ~~~
 pip install pipx
@@ -78,6 +80,8 @@ pipx install git+https://github.com/tinof/ffsubsync@latest
 Usage
 -----
 After installation, three CLI commands are available: `ffs`, `subsync`, and `ffsubsync` (all are equivalent):
+
+Supported subtitle formats: `.srt`, `.ass/.ssa`, MicroDVD `.sub`, and `.vtt`. MicroDVD frame rates are preserved when converting back to `.sub`.
 
 **Basic synchronization with video:**
 ~~~
@@ -105,7 +109,6 @@ ffs reference.srt -i unsynchronized.srt -o synchronized.srt
 ~~~
 python -m ffsubsync video.mp4 -i unsynchronized.srt -o synchronized.srt
 ~~~
-
 The tool uses the file extension to decide whether to perform voice activity
 detection on the audio or to directly extract speech from an srt file.
 
@@ -134,6 +137,7 @@ If the sync fails, the following recourses are available:
 - Try a value of `--max-offset-seconds` greater than the default of 60, in the
   event that the subtitles are out of sync by more than 60 seconds (empirically
   unlikely in practice, but possible).
+- The default voice activity detector is TEN VAD for low-latency, high-accuracy speech detection. Use `--vad=webrtc` if you prefer the legacy WebRTC backend.
 - Try `--vad=auditok` since [auditok](https://github.com/amsehili/auditok) can
   sometimes work better in the case of low-quality audio than WebRTC's VAD.
   Auditok does not specifically detect voice, but instead detects all audio;
@@ -161,9 +165,9 @@ The synchronization algorithm operates in 3 steps:
    windows.
 2. For each 10ms window, determine whether that window contains speech.  This
    is trivial to do for subtitles (we just determine whether any subtitle is
-   "on" during each time window); for the audio stream, use an off-the-shelf
-   voice activity detector (VAD) like
-   the one built into [webrtc](https://webrtc.org/).
+   "on" during each time window); for the audio stream, ffsubsync uses the
+   [TEN VAD](https://github.com/TEN-framework/ten-vad) backend by default, but
+   you can switch to WebRTC (`--vad=webrtc`) or auditok (`--vad=auditok`).
 3. Now we have two binary strings: one for the subtitles, and one for the
    video.  Try to align these strings by matching 0's with 0's and 1's with
    1's. We score these alignments as (# video 1's matched w/ subtitle 1's) - (#

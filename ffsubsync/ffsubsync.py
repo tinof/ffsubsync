@@ -631,6 +631,8 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
             "auditok",
             "subs_then_silero",
             "silero",
+            "subs_then_tenvad",
+            "tenvad",
         ],
         default=None,
         help="Which voice activity detector to use for speech extraction "

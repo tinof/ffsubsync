@@ -149,7 +149,6 @@ def _make_webrtcvad_detector(
                 )
             except Exception:
                 is_speech = False
-                failures += 1
             # webrtcvad has low recall on mode 3, so treat non-speech as "not sure"
             media_bstring.append(1.0 if is_speech else non_speech_label)
         return np.array(media_bstring)
@@ -193,9 +192,66 @@ def _make_silero_detector(
                     exception_logged = True
                     logger.exception("exception occurred during speech detection")
                 speech_prob = 0.0
-                failures += 1
             media_bstring.append(1.0 - (1.0 - speech_prob) * (1.0 - non_speech_label))
         return np.array(media_bstring)
+
+    return _detect
+
+
+def _make_tenvad_detector(
+    sample_rate: int, frame_rate: int, non_speech_label: float
+) -> Callable[[bytes], np.ndarray]:
+    """
+    Create a detector using TEN VAD.
+
+    Notes
+    - TEN VAD expects 16 kHz audio and a hop size of either 160 (10 ms)
+      or 256 (16 ms). We derive hop size from the requested window length
+      implied by `sample_rate` and `frame_rate`.
+    - Returns per-window speech probabilities in [0, 1].
+    """
+    try:
+        from ten_vad import TenVad  # type: ignore
+    except Exception as e:  # pragma: no cover - optional dependency
+        logger.error(
+            "Error: ten-vad not installed or failed to load.\n"
+            "Install it with: pip install ten-vad\n"
+            "TEN VAD requires 16 kHz audio."
+        )
+        raise e
+
+    # Window duration in seconds and derived hop size in samples
+    window_duration = 1.0 / sample_rate
+    frames_per_window = int(window_duration * frame_rate + 0.5)
+
+    # Instantiate detector with derived hop size and a default threshold.
+    # Threshold only affects the binary flag; we will consume the probability.
+    threshold = 0.5
+    ten = TenVad(frames_per_window, threshold)
+
+
+    def _detect(asegment: bytes) -> np.ndarray:
+        # View as int16 without copying
+        pcm = np.frombuffer(asegment, dtype=np.int16)
+        n = len(pcm)
+        media_bstring: List[float] = []
+        # Process in hop-sized chunks
+        for start in range(0, n, frames_per_window):
+            stop = min(start + frames_per_window, n)
+            # If final chunk shorter than hop, pad with zeros to expected length
+            chunk = pcm[start:stop]
+            if len(chunk) < frames_per_window:
+                padded = np.zeros(frames_per_window, dtype=np.int16)
+                padded[: len(chunk)] = chunk
+                chunk = padded
+            try:
+                prob, flag = ten.process(chunk)  # returns (probability, 0/1)
+            except Exception:  # pragma: no cover
+                # Be conservative on exception; treat as non-speech but not certain
+                prob = 0.0
+            # Blend with non_speech_label similar to Silero path
+            media_bstring.append(1.0 - (1.0 - float(prob)) * (1.0 - non_speech_label))
+        return np.array(media_bstring, dtype=float)
 
     return _detect
 
@@ -236,7 +292,15 @@ class VideoSpeechTransformer(TransformerMixin):
         super().__init__()
         self.vad: str = vad
         self.sample_rate: int = sample_rate
-        self.frame_rate: int = frame_rate
+        # TEN VAD requires 16 kHz input. If selected, force 16kHz for extraction.
+        if "tenvad" in vad and frame_rate != 16000:
+            logger.info(
+                "TEN VAD selected: overriding frame_rate %d -> 16000 for extraction.",
+                frame_rate,
+            )
+            self.frame_rate = 16000
+        else:
+            self.frame_rate: int = frame_rate
         self._non_speech_label: float = non_speech_label
         self.start_seconds: int = start_seconds
         self.ffmpeg_path: Optional[str] = ffmpeg_path
@@ -293,6 +357,33 @@ class VideoSpeechTransformer(TransformerMixin):
         subs_to_use = embedded_subs[int(np.argmax(embedded_subs_times))]
         self.video_speech_results_ = subs_to_use.subtitle_speech_results_
 
+    def _build_detector(self) -> Callable[[bytes], np.ndarray]:
+        if "webrtc" in self.vad:
+            return _make_webrtcvad_detector(
+                self.sample_rate, self.frame_rate, self._non_speech_label
+            )
+        if "auditok" in self.vad:
+            return _make_auditok_detector(
+                self.sample_rate, self.frame_rate, self._non_speech_label
+            )
+        if "silero" in self.vad:
+            return _make_silero_detector(
+                self.sample_rate, self.frame_rate, self._non_speech_label
+            )
+        if "tenvad" in self.vad:
+            try:
+                return _make_tenvad_detector(
+                    self.sample_rate, self.frame_rate, self._non_speech_label
+                )
+            except Exception as exc:  # pragma: no cover - fallback path
+                logger.warning(
+                    "TEN VAD unavailable (%s); falling back to WebRTC VAD.", exc
+                )
+                return _make_webrtcvad_detector(
+                    self.sample_rate, self.frame_rate, self._non_speech_label
+                )
+        raise ValueError(f"unknown vad: {self.vad}")
+
     def fit(self, fname: str, *_) -> "VideoSpeechTransformer":
         if "subs" in self.vad and (
             self.ref_stream is None or self.ref_stream.startswith("0:s:")
@@ -320,20 +411,7 @@ class VideoSpeechTransformer(TransformerMixin):
         except Exception as e:
             logger.warning(e)
             total_duration = None
-        if "webrtc" in self.vad:
-            detector = _make_webrtcvad_detector(
-                self.sample_rate, self.frame_rate, self._non_speech_label
-            )
-        elif "auditok" in self.vad:
-            detector = _make_auditok_detector(
-                self.sample_rate, self.frame_rate, self._non_speech_label
-            )
-        elif "silero" in self.vad:
-            detector = _make_silero_detector(
-                self.sample_rate, self.frame_rate, self._non_speech_label
-            )
-        else:
-            raise ValueError(f"unknown vad: {self.vad}")
+        detector = self._build_detector()
         media_bstring: List[np.ndarray] = []
         ffmpeg_args = [
             ffmpeg_bin_path("ffmpeg", ffmpeg_resources_path=self.ffmpeg_path)

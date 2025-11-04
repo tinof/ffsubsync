@@ -214,6 +214,7 @@ def _make_tenvad_detector(
         # Fallback to ONNX-based implementation (ARM64 compatible)
         try:
             from ffsubsync.ten_vad_onnx import TenVadONNX as TenVad  # type: ignore
+
             logger.info(
                 "Using ONNX-based TEN-VAD backend (ARM64/aarch64 compatible). "
                 "For better performance on x64 platforms, install: pip install ten-vad"

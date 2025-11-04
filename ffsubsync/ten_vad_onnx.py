@@ -9,18 +9,15 @@ Copyright © 2025 - ONNX backend implementation for ffsubsync
 TEN-VAD model: Copyright © 2025 Agora (Apache License 2.0)
 """
 
+import os
+import warnings
+
 import numpy as np
 import onnxruntime as ort
-import os
-from typing import Tuple
-import warnings
 
 
 def compute_mel_filterbanks(
-    fft_bins: np.ndarray,
-    n_mels: int = 40,
-    sample_rate: int = 16000,
-    n_fft: int = 512
+    fft_bins: np.ndarray, n_mels: int = 40, sample_rate: int = 16000, n_fft: int = 512
 ) -> np.ndarray:
     """
     Compute mel-filterbank features from FFT magnitude spectrum.
@@ -34,6 +31,7 @@ def compute_mel_filterbanks(
     Returns:
         mel_features: Mel-filterbank energies [n_mels]
     """
+
     # Mel scale conversion functions
     def hz_to_mel(hz):
         return 2595.0 * np.log10(1.0 + hz / 700.0)
@@ -64,7 +62,7 @@ def compute_mel_filterbanks(
                 fbank[m - 1, k] = (f_m_plus - k) / (f_m_plus - f_m)
 
     # Apply filterbank to FFT bins
-    mel_energies = np.dot(fbank, fft_bins ** 2)
+    mel_energies = np.dot(fbank, fft_bins**2)
     mel_energies = np.where(mel_energies == 0, np.finfo(float).eps, mel_energies)
 
     return np.log(mel_energies)
@@ -107,17 +105,19 @@ class TenVadONNX:
         self.window = np.hanning(hop_size)
 
         # Frame buffer for context window (stores last 3 frames)
-        self.frame_buffer = np.zeros((self.context_len, self.n_features), dtype=np.float32)
+        self.frame_buffer = np.zeros(
+            (self.context_len, self.n_features), dtype=np.float32
+        )
         self.frame_index = 0
 
         # Hidden states for stateful RNN (4 states, each [1, 64])
-        self.hidden_states = [np.zeros((1, self.hidden_dim), dtype=np.float32) for _ in range(4)]
+        self.hidden_states = [
+            np.zeros((1, self.hidden_dim), dtype=np.float32) for _ in range(4)
+        ]
 
         # Load ONNX model
         model_path = os.path.join(
-            os.path.dirname(__file__),
-            "onnx_models",
-            "ten-vad.onnx"
+            os.path.dirname(__file__), "onnx_models", "ten-vad.onnx"
         )
 
         if not os.path.exists(model_path):
@@ -135,10 +135,10 @@ class TenVadONNX:
             self.session = ort.InferenceSession(
                 model_path,
                 sess_options=sess_options,
-                providers=['CPUExecutionProvider']
+                providers=["CPUExecutionProvider"],
             )
         except Exception as e:
-            raise RuntimeError(f"Failed to load ONNX model: {e}")
+            raise RuntimeError(f"Failed to load ONNX model: {e}") from e
 
         # Get input/output names
         self.input_names = [inp.name for inp in self.session.get_inputs()]
@@ -147,7 +147,8 @@ class TenVadONNX:
         if len(self.input_names) != 5 or len(self.output_names) != 5:
             warnings.warn(
                 f"Expected 5 inputs and 5 outputs, got {len(self.input_names)} and {len(self.output_names)}. "
-                "Model structure may have changed."
+                "Model structure may have changed.",
+                stacklevel=2,
             )
 
     def extract_features(self, audio_data: np.ndarray) -> np.ndarray:
@@ -167,10 +168,10 @@ class TenVadONNX:
         if len(audio_float) < self.hop_size:
             # Pad if needed
             padded = np.zeros(self.hop_size, dtype=np.float32)
-            padded[:len(audio_float)] = audio_float
+            padded[: len(audio_float)] = audio_float
             audio_float = padded
 
-        windowed = audio_float[:self.hop_size] * self.window
+        windowed = audio_float[: self.hop_size] * self.window
 
         # Compute FFT
         fft_result = np.fft.rfft(windowed, n=self.n_fft)
@@ -181,18 +182,18 @@ class TenVadONNX:
             fft_magnitude,
             n_mels=self.n_mels,
             sample_rate=self.sample_rate,
-            n_fft=self.n_fft
+            n_fft=self.n_fft,
         )
 
         # Compute log energy as the extra feature (41st feature)
-        log_energy = np.log(np.sum(audio_float ** 2) + 1e-10)
+        log_energy = np.log(np.sum(audio_float**2) + 1e-10)
 
         # Concatenate: [40 mel + 1 log_energy] = 41 features
         features = np.concatenate([mel_features, [log_energy]])
 
         return features.astype(np.float32)
 
-    def process(self, audio_data: np.ndarray) -> Tuple[float, int]:
+    def process(self, audio_data: np.ndarray) -> tuple[float, int]:
         """
         Process one audio frame for voice activity detection.
 
@@ -209,7 +210,9 @@ class TenVadONNX:
         if audio_data.ndim != 1:
             raise ValueError(f"Audio data must be 1D, got shape {audio_data.shape}")
         if len(audio_data) != self.hop_size:
-            raise ValueError(f"Audio data length must be {self.hop_size}, got {len(audio_data)}")
+            raise ValueError(
+                f"Audio data length must be {self.hop_size}, got {len(audio_data)}"
+            )
         if audio_data.dtype != np.int16:
             raise ValueError(f"Audio data must be int16, got {audio_data.dtype}")
 
@@ -228,7 +231,9 @@ class TenVadONNX:
 
         # Prepare model inputs
         # Input 0: feature stack [1, 3, 41]
-        input_features = self.frame_buffer.reshape(1, self.context_len, self.n_features).astype(np.float32)
+        input_features = self.frame_buffer.reshape(
+            1, self.context_len, self.n_features
+        ).astype(np.float32)
 
         # Inputs 1-4: hidden states [1, 64] each
         inputs = {
@@ -243,7 +248,7 @@ class TenVadONNX:
         try:
             outputs = self.session.run(self.output_names, inputs)
         except Exception as e:
-            warnings.warn(f"ONNX inference failed: {e}")
+            warnings.warn(f"ONNX inference failed: {e}", stacklevel=2)
             return 0.0, 0
 
         # Extract probability from output 0 [1, 1, 1]
@@ -261,13 +266,17 @@ class TenVadONNX:
 
     def reset(self):
         """Reset internal state (hidden states and frame buffer)."""
-        self.frame_buffer = np.zeros((self.context_len, self.n_features), dtype=np.float32)
+        self.frame_buffer = np.zeros(
+            (self.context_len, self.n_features), dtype=np.float32
+        )
         self.frame_index = 0
-        self.hidden_states = [np.zeros((1, self.hidden_dim), dtype=np.float32) for _ in range(4)]
+        self.hidden_states = [
+            np.zeros((1, self.hidden_dim), dtype=np.float32) for _ in range(4)
+        ]
 
     def __del__(self):
         """Cleanup ONNX session."""
-        if hasattr(self, 'session'):
+        if hasattr(self, "session"):
             del self.session
 
 

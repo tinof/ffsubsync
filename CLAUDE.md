@@ -120,7 +120,50 @@ binary strings -> FFTAligner -> time offset -> SubtitleShifter -> synchronized o
 Backends supported:
 - `webrtcvad-wheels` (default path: `--vad=webrtc`): Voice-specific detection
 - `auditok` (`--vad=auditok`) [optional extra]: Energy/audio activity detector. Install with `pip install ffsubsync[auditok]`. Note: we keep `auditok<0.3.0` to avoid the newer PyAudio/portaudio build requirement on CI.
-- `TEN VAD` (`--vad=tenvad` or `--vad=subs_then_tenvad`) [optional extra]: Low-latency, lightweight, high-accuracy VAD. Requires 16 kHz audio; ffsubsync auto-sets `--frame-rate` to 16000 when selected. Install with `pip install ffsubsync[tenvad]`. If TEN VAD is not installed, the code falls back to WebRTC.
+- `TEN VAD` (`--vad=tenvad` or `--vad=subs_then_tenvad`) [optional extra]: Low-latency, lightweight, high-accuracy VAD. Requires 16 kHz audio; ffsubsync auto-sets `--frame-rate` to 16000 when selected.
+  - **Native backend**: Install with `pip install ffsubsync[tenvad]`. **Platform support:** Linux x64 and macOS only (does NOT support Linux ARM64/aarch64).
+  - **ONNX backend** (new): Install with `pip install ffsubsync[tenvad-onnx]`. **Platform support:** All platforms including Linux ARM64. Uses ONNX Runtime for inference. Slightly slower than native but widely compatible.
+  - **Fallback behavior**: If native `ten-vad` import fails, automatically falls back to ONNX backend (`ffsubsync.ten_vad_onnx`). If neither is available, falls back to WebRTC.
+
+### TEN-VAD ONNX Implementation Details
+
+**Why ONNX Backend?**
+The native `ten-vad` package uses prebuilt binaries (`.so`, `.dll`, `.framework`) that are only available for Linux x64, macOS (Intel/Apple Silicon), and Windows. To support ARM64 Linux (Oracle Cloud, AWS Graviton, etc.), we implemented an ONNX Runtime-based backend.
+
+**Architecture:**
+- **Model File**: `ffsubsync/onnx_models/ten-vad.onnx` (309KB, Apache 2.0 license)
+- **Implementation**: `ffsubsync/ten_vad_onnx.py` - Replicates `ten_vad.TenVad` interface
+- **Dependencies**: `onnxruntime>=1.17.1` (officially supports ARM64 Linux)
+
+**Model Structure:**
+- **Inputs**:
+  - Input 0: Audio features `[1, 3, 41]` - 3 consecutive frames of 41 features
+    - 40 mel-filterbanks (0-8000 Hz range)
+    - 1 log-energy feature
+  - Inputs 1-4: Hidden states `[1, 64]` each - Stateful RNN (LSTM/GRU) internal states
+- **Outputs**:
+  - Output 0: Voice probability `[1, 1, 1]` - Speech detection probability [0.0, 1.0]
+  - Outputs 1-4: Updated hidden states `[1, 64]` each - Fed back into next inference
+
+**Preprocessing Pipeline:**
+1. Convert int16 PCM audio → float32
+2. Apply Hanning window
+3. Compute FFT (512-point)
+4. Extract 40 mel-filterbank features (0-8000 Hz)
+5. Compute log-energy
+6. Stack 3 consecutive frames
+7. Maintain 4 hidden states between calls
+
+**Key Files:**
+- `ffsubsync/ten_vad_onnx.py` - ONNX backend implementation
+- `ffsubsync/onnx_models/ten-vad.onnx` - ONNX model
+- `ffsubsync/onnx_models/README.md` - Model attribution
+- `speech_transformers.py` - Integration with fallback logic
+
+**Performance:**
+- ONNX backend is slightly slower than native (Python preprocessing overhead)
+- Still fast enough for subtitle synchronization (non-real-time processing)
+- ARM64 ONNX Runtime uses CPU optimizations for ARMv8 architecture
 
 ## Code Quality Standards
 

@@ -10,6 +10,19 @@ FFsubsync
 [![Documentation Status](https://readthedocs.org/projects/ffsubsync/badge/?version=latest)](https://ffsubsync.readthedocs.io/en/latest/?badge=latest)
 [![PyPI Version](https://img.shields.io/pypi/v/ffsubsync.svg)](https://pypi.org/project/ffsubsync)
 
+## 🎯 Fork Highlights: ARM64 Support with ONNX-based TEN VAD
+
+This fork adds **ONNX Runtime-based TEN VAD** support, enabling high-accuracy voice activity detection on **ARM64/aarch64 platforms** (Oracle Cloud, AWS Graviton, Raspberry Pi, etc.) where the native TEN VAD binaries are not available.
+
+**Key Features:**
+- ✅ **ARM64 Compatible**: Works on Linux aarch64 systems
+- ✅ **Automatic Fallback**: Native TEN VAD → ONNX TEN VAD → WebRTC VAD
+- ✅ **Same Accuracy**: Uses official TEN-VAD ONNX model (Apache 2.0)
+- ✅ **Easy Install**: `pipx install "git+https://github.com/tinof/ffsubsync.git#egg=ffsubsync[tenvad-onnx]"`
+
+**Upstream**: This fork is based on [smacke/ffsubsync](https://github.com/smacke/ffsubsync)
+
+---
 
 A command-line tool for language-agnostic automatic synchronization of subtitles with video, so that
 subtitles are aligned to the correct starting point within the video.
@@ -52,15 +65,33 @@ sudo dnf install ffmpeg
 
 The recommended way to install ffsubsync is using [pipx](https://pypa.github.io/pipx/), which installs the package in an isolated environment and makes the CLI commands globally available.
 
-TEN VAD is the default VAD in ffsubsync, but it is an optional extra to avoid build issues in minimal environments. To install with TEN VAD enabled by default, use the `tenvad` extra:
+This fork includes **ONNX-based TEN VAD** support for ARM64/aarch64 platforms (Oracle Cloud, AWS Graviton, Raspberry Pi, etc.). The native TEN VAD is only available on **Linux x64** and **macOS** (both Intel and Apple Silicon).
+
+**For ARM64/aarch64 systems** (recommended):
 
 ~~~
-pipx install "ffsubsync[tenvad]"
+pipx install "git+https://github.com/tinof/ffsubsync.git#egg=ffsubsync[tenvad-onnx]"
+~~~
+
+**For Linux x64 / macOS** (native TEN VAD - best performance):
+
+~~~
+pipx install "git+https://github.com/tinof/ffsubsync.git#egg=ffsubsync[tenvad]"
+~~~
+
+**For minimal installations** (WebRTC VAD fallback):
+
+~~~
+pipx install "git+https://github.com/tinof/ffsubsync.git"
 ~~~
 
 If you already installed without the extra, you can add TEN VAD later:
 
 ~~~
+# ARM64 systems:
+pipx inject ffsubsync onnxruntime
+
+# Linux x64 / macOS:
 pipx inject ffsubsync ten-vad
 ~~~
 
@@ -71,25 +102,49 @@ pip install pipx
 
 ### Alternative Installation (pip)
 
-You can also install using pip (requires Python >= 3.8):
+You can also install using pip (requires Python >= 3.9):
 
-From PyPI with TEN VAD:
-~~~
-pip install "ffsubsync[tenvad]"
-~~~
+**From this fork** (recommended):
 
-From a local wheel you built:
 ~~~
-pipx install "ffsubsync[tenvad] @ file://$PWD/dist/ffsubsync-<version>.whl"
-~~~
+# ARM64 / all platforms (ONNX backend)
+pip install "git+https://github.com/tinof/ffsubsync.git#egg=ffsubsync[tenvad-onnx]"
 
-From the latest development branch via Git (pip or pipx both work):
-~~~
-pip install "ffsubsync[tenvad] @ git+https://github.com/tinof/ffsubsync@latest"
-pipx install "ffsubsync[tenvad] @ git+https://github.com/tinof/ffsubsync@latest"
+# Linux x64 / macOS (native TEN VAD)
+pip install "git+https://github.com/tinof/ffsubsync.git#egg=ffsubsync[tenvad]"
+
+# WebRTC only
+pip install "git+https://github.com/tinof/ffsubsync.git"
 ~~~
 
-If you choose to install without TEN VAD (no extras), ffsubsync will fall back to the WebRTC VAD automatically.
+**From a local clone:**
+
+~~~bash
+git clone https://github.com/tinof/ffsubsync.git
+cd ffsubsync
+
+# ARM64 systems
+pip install ".[tenvad-onnx]"
+
+# Linux x64 / macOS
+pip install ".[tenvad]"
+
+# WebRTC only
+pip install .
+~~~
+
+**From a local wheel you built:**
+
+~~~
+pip install "dist/ffsubsync-<version>-py3-none-any.whl[tenvad-onnx]"  # ONNX backend
+pip install "dist/ffsubsync-<version>-py3-none-any.whl[tenvad]"       # native TEN VAD
+pip install "dist/ffsubsync-<version>-py3-none-any.whl"                # WebRTC only
+~~~
+
+**VAD Backend Priority:**
+1. If `ten-vad` is installed → uses native TEN VAD (best performance)
+2. If `onnxruntime` is installed → uses ONNX-based TEN VAD (ARM64 compatible)
+3. Otherwise → falls back to WebRTC VAD automatically
 
 ### Verifying TEN VAD is active
 

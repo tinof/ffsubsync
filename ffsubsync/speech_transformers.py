@@ -210,13 +210,22 @@ def _make_tenvad_detector(
     """
     try:
         from ten_vad import TenVad  # type: ignore
-    except Exception as e:  # pragma: no cover - optional dependency
-        logger.error(
-            "Error: ten-vad not installed or failed to load.\n"
-            "Install it with: pip install ten-vad\n"
-            "TEN VAD requires 16 kHz audio."
-        )
-        raise e
+    except Exception:  # pragma: no cover - optional dependency
+        # Fallback to ONNX-based implementation (ARM64 compatible)
+        try:
+            from ffsubsync.ten_vad_onnx import TenVadONNX as TenVad  # type: ignore
+            logger.info(
+                "Using ONNX-based TEN-VAD backend (ARM64/aarch64 compatible). "
+                "For better performance on x64 platforms, install: pip install ten-vad"
+            )
+        except Exception as e:  # pragma: no cover
+            logger.error(
+                "Error: Neither ten-vad nor ONNX backend available.\n"
+                "Install with: pip install ffsubsync[tenvad-onnx]\n"
+                "Or for x64 platforms: pip install ten-vad\n"
+                "TEN VAD requires 16 kHz audio."
+            )
+            raise e
 
     # Window duration in seconds and derived hop size in samples
     window_duration = 1.0 / sample_rate

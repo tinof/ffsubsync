@@ -65,21 +65,32 @@ sudo dnf install ffmpeg
 
 The recommended way to install ffsubsync is using [pipx](https://pypa.github.io/pipx/), which installs the package in an isolated environment and makes the CLI commands globally available.
 
-This fork includes **ONNX-based TEN VAD** support for ARM64/aarch64 platforms (Oracle Cloud, AWS Graviton, Raspberry Pi, etc.). The native TEN VAD is only available on **Linux x64** and **macOS** (both Intel and Apple Silicon).
+This fork is the canonical distribution for our builds and includes **ONNX-based TEN VAD** support for ARM64/aarch64 platforms (Oracle Cloud, AWS Graviton, Raspberry Pi, etc.). Native TEN VAD is available on **Linux x64** and **macOS** (Intel and Apple Silicon).
 
-**For ARM64/aarch64 systems** (recommended):
-
-~~~
-pipx install "git+https://github.com/tinof/ffsubsync.git#egg=ffsubsync[tenvad-onnx]"
-~~~
-
-**For Linux x64 / macOS** (native TEN VAD - best performance):
+**ARM64/aarch64 (recommended ONNX backend, stable tag):**
 
 ~~~
-pipx install "git+https://github.com/tinof/ffsubsync.git#egg=ffsubsync[tenvad]"
+pipx install "ffsubsync[tenvad-onnx] @ git+https://github.com/tinof/ffsubsync@LATEST"
+# Older pipx compatibility:
+pipx install 'git+https://github.com/tinof/ffsubsync@LATEST#egg=ffsubsync[tenvad-onnx]'
 ~~~
 
-**For minimal installations** (WebRTC VAD fallback):
+**Linux x64 / macOS (native TEN VAD - best performance, stable tag):**
+
+~~~
+pipx install "ffsubsync[tenvad] @ git+https://github.com/tinof/ffsubsync@LATEST"
+# Older pipx compatibility:
+pipx install 'git+https://github.com/tinof/ffsubsync@LATEST#egg=ffsubsync[tenvad]'
+~~~
+
+**Development head (master):**
+
+~~~
+pipx install 'git+https://github.com/tinof/ffsubsync@master#egg=ffsubsync[tenvad-onnx]'
+pipx install 'git+https://github.com/tinof/ffsubsync@master#egg=ffsubsync[tenvad]'
+~~~
+
+**Minimal installations** (WebRTC VAD fallback):
 
 ~~~
 pipx install "git+https://github.com/tinof/ffsubsync.git"
@@ -92,7 +103,9 @@ If you already installed without the extra, you can add TEN VAD later:
 pipx inject ffsubsync onnxruntime
 
 # Linux x64 / macOS:
-pipx inject ffsubsync ten-vad
+pipx inject ffsubsync 'ten-vad'
+# If PyPI wheels fail to build on your platform, inject from GitHub instead:
+pipx inject ffsubsync 'ten-vad @ git+https://github.com/TEN-framework/ten-vad.git'
 ~~~
 
 If you don't have pipx installed, you can install it first:
@@ -104,17 +117,30 @@ pip install pipx
 
 You can also install using pip (requires Python >= 3.9):
 
-**From this fork** (recommended):
+**From this fork (stable tag, recommended):**
 
 ~~~
 # ARM64 / all platforms (ONNX backend)
-pip install "git+https://github.com/tinof/ffsubsync.git#egg=ffsubsync[tenvad-onnx]"
+pip install "ffsubsync[tenvad-onnx] @ git+https://github.com/tinof/ffsubsync@LATEST"
+# Compatibility fallback:
+pip install 'git+https://github.com/tinof/ffsubsync@LATEST#egg=ffsubsync[tenvad-onnx]'
 
 # Linux x64 / macOS (native TEN VAD)
-pip install "git+https://github.com/tinof/ffsubsync.git#egg=ffsubsync[tenvad]"
+pip install "ffsubsync[tenvad] @ git+https://github.com/tinof/ffsubsync@LATEST"
+# Compatibility fallback:
+pip install 'git+https://github.com/tinof/ffsubsync@LATEST#egg=ffsubsync[tenvad]'
 
 # WebRTC only
-pip install "git+https://github.com/tinof/ffsubsync.git"
+pip install "ffsubsync @ git+https://github.com/tinof/ffsubsync@LATEST"
+~~~
+
+**From the latest development branch via Git (pip or pipx both work):**
+
+~~~
+pip install  'git+https://github.com/tinof/ffsubsync@master#egg=ffsubsync[tenvad-onnx]'
+pipx install 'git+https://github.com/tinof/ffsubsync@master#egg=ffsubsync[tenvad-onnx]'
+pip install  'git+https://github.com/tinof/ffsubsync@master#egg=ffsubsync[tenvad]'
+pipx install 'git+https://github.com/tinof/ffsubsync@master#egg=ffsubsync[tenvad]'
 ~~~
 
 **From a local clone:**
@@ -140,6 +166,17 @@ pip install "dist/ffsubsync-<version>-py3-none-any.whl[tenvad-onnx]"  # ONNX bac
 pip install "dist/ffsubsync-<version>-py3-none-any.whl[tenvad]"       # native TEN VAD
 pip install "dist/ffsubsync-<version>-py3-none-any.whl"                # WebRTC only
 ~~~
+
+> Note on TEN VAD wheels
+>
+> - TEN VAD provides Linux x64 Python support and prebuilt libraries; on some
+>   platforms a local build may be attempted. If `ten-vad` fails to build, you
+>   can either:
+>   - install ffsubsync without the extra (defaults to WebRTC VAD), or
+>   - inject TEN VAD from GitHub as shown above.
+> - On Debian/Ubuntu, you may need: `sudo apt update && sudo apt install libc++1`.
+
+If you choose to install without TEN VAD (no extras), ffsubsync will fall back to the WebRTC VAD automatically.
 
 **VAD Backend Priority:**
 1. If `ten-vad` is installed → uses native TEN VAD (best performance)

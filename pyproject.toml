@@ -80,6 +80,13 @@ tenvad-onnx = [
     # Requires ONNX Runtime 1.17.1+ (officially supports ARM64 Linux)
     "onnxruntime>=1.17.1",
 ]
+silero = [
+    # Silero VAD ONNX backend for high-accuracy speech detection
+    # Better music/speech discrimination than WebRTC/TEN
+    # Requires 16 kHz input, uses stateful ONNX model
+    "onnxruntime>=1.17.1",
+    "requests",
+]
 
 [project.urls]
 Homepage = "https://github.com/smacke/ffsubsync"

@@ -15,6 +15,34 @@ FFsubsync is a language-agnostic command-line tool for automatic synchronization
 
 ## Development Commands
 
+You run in an environment where `ast-grep` is available. Use it strategically:
+
+**When to use ast-grep (PREFERRED for code):**
+- Searching for code patterns, structures, or syntax elements in source files
+- Finding function/method definitions, class declarations, imports, etc.
+- Structural matching (e.g., list comprehensions, decorators, method calls)
+- Refactoring or code analysis tasks
+- When precision matters (avoid matching in comments/strings)
+
+**Command format:**
+- Basic: `ast-grep -l <language> -p '<pattern>' <path>`
+- With context: `ast-grep -l <language> -p '<pattern>' <path> -C <lines>`
+- Common languages: `python`, `javascript`, `typescript`, `rust`, `go`, `java`
+
+**Pattern syntax:**
+- `$VAR` - matches a single AST node (variable, expression, etc.)
+- `$$$` - matches zero or more AST nodes (function arguments, list items, etc.)
+- Patterns must be syntactically complete (e.g., `def $FUNC($$$):` not `def $FUNC`)
+
+**When to use grep/ripgrep instead:**
+- Plain text searches (log files, documentation, config files, data files)
+- Simple literal string searches across any file type
+- Searching inside strings, comments, or documentation
+- When speed is critical and syntax awareness not needed
+- User explicitly requests text-only search
+
+**Default to ast-grep for source code unless there's a specific reason to use grep.**
+
 ### Environment Setup
 ```bash
 # Install development dependencies (recommended)

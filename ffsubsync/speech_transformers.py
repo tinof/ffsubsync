@@ -4,6 +4,7 @@ import subprocess
 import sys
 from contextlib import contextmanager
 from datetime import timedelta
+from pathlib import Path
 from typing import Callable, Optional, Union, cast
 
 import ffmpeg
@@ -25,6 +26,52 @@ from ffsubsync.subtitle_transformers import SubtitleScaler
 
 logging.basicConfig(level=logging.INFO)
 logger: logging.Logger = logging.getLogger(__name__)
+
+
+def _get_silero_model_path() -> Path:
+    """
+    Get or download the Silero VAD ONNX model.
+
+    Returns the path to the cached model file, downloading if necessary.
+    """
+    # Determine cache directory
+    cache_dir = Path.home() / ".cache" / "ffsubsync"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    model_path = cache_dir / "silero_vad.onnx"
+
+    # Return if model already exists
+    if model_path.exists():
+        logger.debug(f"Using cached Silero VAD model: {model_path}")
+        return model_path
+
+    # Download model
+    model_url = "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
+    logger.info(f"Downloading Silero VAD ONNX model from {model_url}...")
+
+    try:
+        import requests
+
+        response = requests.get(model_url, timeout=30)
+        response.raise_for_status()
+
+        # Write to temp file first, then rename (atomic operation)
+        temp_path = model_path.with_suffix(".onnx.tmp")
+        temp_path.write_bytes(response.content)
+        temp_path.rename(model_path)
+
+        logger.info(f"Silero VAD model downloaded successfully: {model_path}")
+        return model_path
+
+    except ImportError:
+        raise ImportError(
+            "requests library is required to download Silero VAD model. "
+            "Install with: pip install ffsubsync[silero]"
+        ) from None
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to download Silero VAD model from {model_url}: {e}"
+        ) from e
 
 
 def make_subtitle_speech_pipeline(
@@ -158,39 +205,124 @@ def _make_webrtcvad_detector(
 def _make_silero_detector(
     sample_rate: int, frame_rate: int, non_speech_label: float
 ) -> Callable[[bytes], np.ndarray]:
-    import torch
+    """
+    Create Silero VAD detector using ONNX Runtime.
+
+    Silero VAD is a stateful model that requires hidden states (h, c) to be
+    passed between inference calls. Uses 512-sample chunks at 16kHz.
+    """
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        raise ImportError(
+            "onnxruntime is required for Silero VAD. "
+            "Install with: pip install ffsubsync[silero]"
+        ) from None
 
     window_duration = 1.0 / sample_rate  # duration in seconds
     frames_per_window = int(window_duration * frame_rate + 0.5)
-    bytes_per_frame = 1
 
-    model, _ = torch.hub.load(
-        repo_or_dir="snakers4/silero-vad",
-        model="silero_vad",
-        force_reload=False,
-        onnx=False,
+    # Get or download the ONNX model
+    model_path = _get_silero_model_path()
+
+    # Initialize ONNX Runtime session
+    # Use CPUExecutionProvider for best compatibility on ARM64
+    session_options = ort.SessionOptions()
+    session_options.inter_op_num_threads = 1
+    session_options.intra_op_num_threads = 1
+
+    providers = ["CPUExecutionProvider"]
+    session = ort.InferenceSession(
+        str(model_path), sess_options=session_options, providers=providers
     )
+
+    logger.info("Silero VAD ONNX backend initialized (CPUExecutionProvider)")
+
+    # Silero VAD requires EXACTLY 512 samples per chunk at 16kHz (32ms)
+    silero_chunk_size = 512
+    # Silero also requires 64-sample context window at 16kHz
+    context_size = 64
+
+    # Initialize hidden state for the stateful model
+    # state has shape (2, 1, 128) for batch size 1
+    state = np.zeros((2, 1, 128), dtype=np.float32)
+    # Initialize context buffer
+    context = np.zeros((1, context_size), dtype=np.float32)
 
     exception_logged = False
 
-    def _detect(asegment) -> np.ndarray:
-        asegment = np.frombuffer(asegment, np.int16).astype(np.float32) / (1 << 15)
-        asegment = torch.FloatTensor(asegment)
-        media_bstring = []
-        for start in range(0, len(asegment) // bytes_per_frame, frames_per_window):
-            stop = min(start + frames_per_window, len(asegment))
+    def _detect(asegment: bytes) -> np.ndarray:
+        nonlocal state, context, exception_logged
+
+        # Convert bytes to float32 audio
+        audio = np.frombuffer(asegment, np.int16).astype(np.float32) / 32768.0
+
+        # Calculate number of our output windows
+        num_windows = (len(audio) + frames_per_window - 1) // frames_per_window
+
+        # Process audio in 512-sample chunks for Silero
+        silero_probs = []
+        for i in range(0, len(audio), silero_chunk_size):
+            chunk = audio[i : i + silero_chunk_size]
+
+            # Pad last chunk if necessary
+            if len(chunk) < silero_chunk_size:
+                padded = np.zeros(silero_chunk_size, dtype=np.float32)
+                padded[: len(chunk)] = chunk
+                chunk = padded
+
             try:
-                speech_prob = model(
-                    asegment[start * bytes_per_frame : stop * bytes_per_frame],
-                    frame_rate,
-                ).item()
+                # Concatenate context + chunk as required by Silero ONNX
+                # Input shape must be (1, context_size + chunk_size) = (1, 64 + 512) = (1, 576)
+                input_with_context = np.concatenate(
+                    [context, chunk.reshape(1, silero_chunk_size)], axis=1
+                ).astype(np.float32)
+
+                # Prepare ONNX inputs
+                # input: (1, 576) - context + audio chunk
+                # sr: int64 scalar - sample rate
+                # state: (2, 1, 128) - hidden state
+                ort_inputs = {
+                    "input": input_with_context,
+                    "sr": np.array(frame_rate, dtype=np.int64),
+                    "state": state,
+                }
+
+                # Run inference
+                # Returns: [output, stateN]
+                outputs = session.run(None, ort_inputs)
+                speech_prob = float(outputs[0][0][0])  # Extract scalar probability
+
+                # Update hidden state for next iteration (stateful!)
+                state = outputs[1]
+
+                # Update context to be the last context_size samples
+                context = input_with_context[:, -context_size:]
+
             except Exception:
-                nonlocal exception_logged
                 if not exception_logged:
                     exception_logged = True
                     logger.exception("exception occurred during speech detection")
                 speech_prob = 0.0
-            media_bstring.append(1.0 - (1.0 - speech_prob) * (1.0 - non_speech_label))
+
+            silero_probs.append(speech_prob)
+
+        # Map Silero chunk probabilities to our smaller windows
+        # Each Silero chunk covers multiple windows
+        windows_per_silero_chunk = silero_chunk_size / frames_per_window
+        media_bstring = []
+
+        for window_idx in range(num_windows):
+            # Find which Silero chunk this window belongs to
+            silero_idx = int(window_idx / windows_per_silero_chunk)
+            silero_idx = min(silero_idx, len(silero_probs) - 1)  # Clamp to valid range
+
+            speech_prob = silero_probs[silero_idx]
+
+            # Blend probability with non_speech_label
+            blended_prob = 1.0 - (1.0 - speech_prob) * (1.0 - non_speech_label)
+            media_bstring.append(blended_prob)
+
         return np.array(media_bstring)
 
     return _detect
@@ -263,6 +395,135 @@ def _make_tenvad_detector(
     return _detect
 
 
+class WhisperSpeechTransformer(TransformerMixin):
+    def __init__(
+        self,
+        sample_rate: int,
+        frame_rate: int,
+        start_seconds: int = 0,
+        ffmpeg_path: Optional[str] = None,
+        vlc_mode: bool = False,
+        max_transcription_seconds: float = 300.0,
+    ) -> None:
+        super().__init__()
+        self.sample_rate: int = sample_rate
+        self.frame_rate: int = frame_rate
+        self.start_seconds: int = start_seconds
+        self.ffmpeg_path: Optional[str] = ffmpeg_path
+        self.vlc_mode: bool = vlc_mode
+        self.max_transcription_seconds: float = max_transcription_seconds
+        self.video_speech_results_: Optional[np.ndarray] = None
+
+    def fit(self, fname: str, *_) -> "WhisperSpeechTransformer":
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
+            raise ImportError(
+                "faster-whisper is required for Whisper VAD. "
+                "Install with: pip install ffsubsync[whisper] or pip install faster-whisper"
+            ) from None
+
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".wav") as tmp_audio:
+            logger.info("Extracting audio for Whisper VAD...")
+
+            ffmpeg_args = [
+                ffmpeg_bin_path("ffmpeg", ffmpeg_resources_path=self.ffmpeg_path)
+            ]
+            if self.start_seconds > 0:
+                ffmpeg_args.extend(["-ss", str(timedelta(seconds=self.start_seconds))])
+
+            ffmpeg_args.extend(
+                [
+                    "-y",
+                    "-loglevel",
+                    "fatal",
+                    "-nostdin",
+                    "-i",
+                    fname,
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                ]
+            )
+
+            # We can limit the duration of extraction too, to save time!
+            # But user didn't explicitly ask for that, and we might want to keep it simple.
+            # Actually, if we only need 5 mins, we should only extract 5 mins.
+            # Let's add -t to ffmpeg if max_transcription_seconds is set.
+            if self.max_transcription_seconds:
+                ffmpeg_args.extend(["-t", str(self.max_transcription_seconds)])
+
+            ffmpeg_args.extend(["-f", "wav", tmp_audio.name])
+            subprocess.check_call(ffmpeg_args, **subprocess_args(include_stdout=False))
+
+            logger.info("Loading faster-whisper model 'tiny'...")
+            # device="cpu" and compute_type="int8" are good defaults for speed on most machines including ARM64
+            model = WhisperModel("tiny", device="cpu", compute_type="int8")
+
+            logger.info("Transcribing audio...")
+            # vad_filter=True helps remove non-speech noises even within segments
+            # But it might be too aggressive for speech over music. Let's try False.
+            segments, info = model.transcribe(tmp_audio.name, vad_filter=False)
+
+            # info.duration is the duration of the audio file we passed in
+            # We must use self.sample_rate (100Hz) for the output array, NOT self.frame_rate (audio rate)
+            duration_to_use = info.duration
+            if (
+                self.max_transcription_seconds
+                and duration_to_use > self.max_transcription_seconds
+            ):
+                duration_to_use = self.max_transcription_seconds
+
+            total_frames = int(duration_to_use * self.sample_rate)
+            media_bstring = np.zeros(
+                total_frames + 100, dtype=float
+            )  # Add a bit of padding just in case
+
+            count = 0
+            for segment in segments:
+                if (
+                    self.max_transcription_seconds
+                    and segment.end > self.max_transcription_seconds
+                ):
+                    break
+
+                # Filter out music/sound markers if possible
+                text = segment.text.strip()
+                if text.startswith("[") and text.endswith("]"):
+                    logger.info(
+                        f"Ignored non-speech segment: {text} at {segment.start}-{segment.end}"
+                    )
+                    continue
+
+                logger.info(f"Speech segment: {text} at {segment.start}-{segment.end}")
+
+                start_frame = int(segment.start * self.sample_rate)
+                end_frame = int(segment.end * self.sample_rate)
+                # Clip to array bounds
+                start_frame = max(0, start_frame)
+                end_frame = min(len(media_bstring), end_frame)
+
+                if end_frame > start_frame:
+                    media_bstring[start_frame:end_frame] = 1.0
+                count += 1
+
+            # Trim to actual duration if needed, but having a bit extra is usually fine.
+            # The aligner might complain if sizes are vastly different, but usually it handles it.
+            # Let's trim to the exact frame count expected from info.duration
+            media_bstring = media_bstring[:total_frames]
+
+            logger.info(f"Detected {count} speech segments.")
+            self.video_speech_results_ = media_bstring
+
+        return self
+
+    def transform(self, *_) -> np.ndarray:
+        return self.video_speech_results_
+
+
 class ComputeSpeechFrameBoundariesMixin:
     def __init__(self) -> None:
         self.start_frame_: Optional[int] = None
@@ -303,6 +564,13 @@ class VideoSpeechTransformer(TransformerMixin):
         if "tenvad" in vad and frame_rate != 16000:
             logger.info(
                 "TEN VAD selected: overriding frame_rate %d -> 16000 for extraction.",
+                frame_rate,
+            )
+            self.frame_rate = 16000
+        # Silero VAD also requires 16 kHz (or 8 kHz) input
+        elif "silero" in vad and frame_rate != 16000:
+            logger.info(
+                "Silero VAD selected: overriding frame_rate %d -> 16000 for extraction.",
                 frame_rate,
             )
             self.frame_rate = 16000

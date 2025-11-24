@@ -14,3 +14,4 @@ webrtcvad-wheels
 # ten-vad>=1.0
 # Optional: Auditok backend (install via extra)
 # auditok<0.3.0
+faster-whisper

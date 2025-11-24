@@ -10,7 +10,7 @@ from typing import Any, Callable, Optional, Union, cast
 
 import numpy as np
 
-from ffsubsync.aligners import FFTAligner, MaxScoreAligner
+from ffsubsync.aligners import FFTAligner, MaxScoreAligner, SegmentedAligner
 from ffsubsync.constants import (
     DEFAULT_APPLY_OFFSET_SECONDS,
     DEFAULT_ENCODING,
@@ -29,6 +29,7 @@ from ffsubsync.sklearn_shim import Pipeline, TransformerMixin
 from ffsubsync.speech_transformers import (
     DeserializeSpeechTransformer,
     VideoSpeechTransformer,
+    WhisperSpeechTransformer,
     make_subtitle_speech_pipeline,
 )
 from ffsubsync.subtitle_parser import make_subtitle_parser
@@ -166,8 +167,24 @@ def try_sync(
                 best_srt_pipe = cast(Pipeline, srt_pipes[0])
                 offset_samples = 0
             else:
+                # Choose aligner based on CLI flag
+                if args.use_segmented_aligner:
+                    aligner_class = SegmentedAligner
+                    aligner_kwargs = {
+                        "window_size_seconds": args.segment_window,
+                        "overlap_seconds": args.segment_overlap,
+                        # Note: sample_rate will use default of 100 (matches SAMPLE_RATE)
+                    }
+                else:
+                    aligner_class = FFTAligner
+                    aligner_kwargs = {}  # FFTAligner doesn't need extra kwargs
+
                 (best_score, offset_samples), best_srt_pipe = MaxScoreAligner(
-                    FFTAligner, srtin, SAMPLE_RATE, args.max_offset_seconds
+                    aligner_class,
+                    srtin,
+                    SAMPLE_RATE,
+                    args.max_offset_seconds,
+                    **aligner_kwargs,
                 ).fit_transform(
                     reference_pipe.transform(args.reference),
                     srt_pipes,
@@ -240,6 +257,21 @@ def make_reference_pipe(args: argparse.Namespace) -> Pipeline:
         ref_stream = args.reference_stream
         if ref_stream is not None and not ref_stream.startswith("0:"):
             ref_stream = "0:" + ref_stream
+        if vad == "whisper":
+            return Pipeline(
+                [
+                    (
+                        "speech_extract",
+                        WhisperSpeechTransformer(
+                            sample_rate=SAMPLE_RATE,
+                            frame_rate=args.frame_rate,
+                            start_seconds=args.start_seconds,
+                            ffmpeg_path=args.ffmpeg_path,
+                            vlc_mode=args.vlc_mode,
+                        ),
+                    ),
+                ]
+            )
         return Pipeline(
             [
                 (
@@ -633,6 +665,7 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
             "silero",
             "subs_then_tenvad",
             "tenvad",
+            "whisper",
         ],
         default=None,
         help="Which voice activity detector to use for speech extraction "
@@ -681,6 +714,28 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="If specified, use golden-section search to try to find"
         "the optimal framerate ratio between video and subtitles.",
+    )
+    parser.add_argument(
+        "--use-segmented-aligner",
+        action="store_true",
+        default=False,
+        help="Use segmented voting aligner for more robust alignment. "
+        "Recommended for videos with long intros or complex audio that may "
+        "confuse standard alignment.",
+    )
+    parser.add_argument(
+        "--segment-window",
+        type=int,
+        default=600,
+        help="Window size in seconds for segmented aligner (default=600). "
+        "Only used when --use-segmented-aligner is specified.",
+    )
+    parser.add_argument(
+        "--segment-overlap",
+        type=int,
+        default=300,
+        help="Overlap size in seconds for segmented aligner (default=300). "
+        "Only used when --use-segmented-aligner is specified.",
     )
     parser.add_argument(
         "--strict",

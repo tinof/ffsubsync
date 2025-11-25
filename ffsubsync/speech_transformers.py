@@ -173,6 +173,33 @@ def _make_auditok_detector(
     return _detect
 
 
+def _smooth_vad_output(signal: np.ndarray, iterations: int) -> np.ndarray:
+    """
+    Apply binary dilation to fill small gaps in VAD output.
+
+    This makes the audio fingerprint look more like subtitle fingerprint
+    by filling gaps shorter than iterations * 10ms (at 100 sample_rate).
+
+    Uses numpy convolution to avoid scipy dependency.
+    """
+    if iterations <= 0:
+        return signal
+
+    # Convert to binary
+    binary = signal > 0.5
+
+    # Apply dilation using convolution with a kernel of ones
+    # Kernel size: 2 * iterations + 1 (symmetric around center)
+    kernel_size = 2 * iterations + 1
+    kernel = np.ones(kernel_size, dtype=float)
+
+    # Convolve: any non-zero value means there was speech within the window
+    result = np.convolve(binary.astype(float), kernel, mode="same")
+
+    # Convert back to binary (any overlap with the kernel means speech)
+    return (result > 0).astype(float)
+
+
 def _make_webrtcvad_detector(
     sample_rate: int, frame_rate: int, non_speech_label: float
 ) -> Callable[[bytes], np.ndarray]:
@@ -183,21 +210,39 @@ def _make_webrtcvad_detector(
     window_duration = 1.0 / sample_rate  # duration in seconds
     frames_per_window = int(window_duration * frame_rate + 0.5)
     bytes_per_frame = 2
+    chunk_size = frames_per_window * bytes_per_frame
 
     def _detect(asegment: bytes) -> np.ndarray:
+        # Create a zero-copy memory view to avoid millions of allocations
+        mem_view = memoryview(asegment)
         media_bstring = []
-        for start in range(0, len(asegment) // bytes_per_frame, frames_per_window):
-            stop = min(start + frames_per_window, len(asegment) // bytes_per_frame)
+        n_bytes = len(asegment)
+
+        # Iterate using pre-calculated chunk size
+        for start in range(0, n_bytes, chunk_size):
+            # Ensure we don't go out of bounds (drop incomplete last chunk)
+            if start + chunk_size > n_bytes:
+                break
+
+            # Zero-copy slice
+            chunk = mem_view[start : start + chunk_size]
+
             try:
-                is_speech = vad.is_speech(
-                    asegment[start * bytes_per_frame : stop * bytes_per_frame],
-                    sample_rate=frame_rate,
-                )
+                # bytes(chunk) is needed by webrtcvad C-extension
+                # but we saved the slice creation overhead
+                is_speech = vad.is_speech(bytes(chunk), sample_rate=frame_rate)
             except Exception:
                 is_speech = False
             # webrtcvad has low recall on mode 3, so treat non-speech as "not sure"
             media_bstring.append(1.0 if is_speech else non_speech_label)
-        return np.array(media_bstring)
+
+        result = np.array(media_bstring)
+
+        # Fill gaps shorter than 300ms (30 frames at 100 sample_rate)
+        # This matches subtitle characteristics better than raw VAD
+        smoothed = _smooth_vad_output(result, iterations=30)
+
+        return smoothed
 
     return _detect
 
@@ -571,6 +616,13 @@ class VideoSpeechTransformer(TransformerMixin):
         elif "silero" in vad and frame_rate != 16000:
             logger.info(
                 "Silero VAD selected: overriding frame_rate %d -> 16000 for extraction.",
+                frame_rate,
+            )
+            self.frame_rate = 16000
+        # WebRTC VAD: speech information is fully contained in 16kHz, so downsample for 3x speedup
+        elif "webrtc" in vad and frame_rate > 16000:
+            logger.info(
+                "WebRTC VAD selected: reducing frame_rate from %d to 16000 for 3x speedup.",
                 frame_rate,
             )
             self.frame_rate = 16000

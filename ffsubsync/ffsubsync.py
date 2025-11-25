@@ -285,6 +285,7 @@ def make_reference_pipe(args: argparse.Namespace) -> Pipeline:
                         ffmpeg_path=args.ffmpeg_path,
                         ref_stream=ref_stream,
                         vlc_mode=args.vlc_mode,
+                        vad_smoothing_window=args.vad_smoothing_window,
                     ),
                 ),
             ]
@@ -670,6 +671,14 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Which voice activity detector to use for speech extraction "
         f"(if using video / audio as a reference, default={DEFAULT_VAD}).",
+    )
+    parser.add_argument(
+        "--vad-smoothing-window",
+        type=int,
+        default=30,
+        help="Window size in frames (10ms) for smoothing VAD output. "
+        "Larger values fill longer pauses. Default=30 (300ms). "
+        "Only applies to WebRTC VAD.",
     )
     parser.add_argument(
         "--no-fix-framerate",

@@ -173,35 +173,33 @@ def _make_auditok_detector(
     return _detect
 
 
-def _smooth_vad_output(signal: np.ndarray, iterations: int) -> np.ndarray:
+def _smooth_speech(raw_speech: np.ndarray, window_size: int = 30) -> np.ndarray:
     """
-    Apply binary dilation to fill small gaps in VAD output.
+    Fills gaps in speech using a simple convolution (dilation).
 
-    This makes the audio fingerprint look more like subtitle fingerprint
-    by filling gaps shorter than iterations * 10ms (at 100 sample_rate).
+    window_size: Number of frames for gap filling.
+                 Default 30 frames @ 100Hz = 300ms gap filling.
 
     Uses numpy convolution to avoid scipy dependency.
     """
-    if iterations <= 0:
-        return signal
+    if window_size <= 1:
+        return raw_speech
 
-    # Convert to binary
-    binary = signal > 0.5
+    # Create a kernel of ones (this acts as the dilation window)
+    kernel = np.ones(window_size)
 
-    # Apply dilation using convolution with a kernel of ones
-    # Kernel size: 2 * iterations + 1 (symmetric around center)
-    kernel_size = 2 * iterations + 1
-    kernel = np.ones(kernel_size, dtype=float)
+    # Convolve. If any speech frame falls within the window, the result > 0
+    smoothed = np.convolve(raw_speech, kernel, mode="same")
 
-    # Convolve: any non-zero value means there was speech within the window
-    result = np.convolve(binary.astype(float), kernel, mode="same")
-
-    # Convert back to binary (any overlap with the kernel means speech)
-    return (result > 0).astype(float)
+    # Convert back to binary (0.0 or 1.0)
+    return (smoothed > 0).astype(float)
 
 
 def _make_webrtcvad_detector(
-    sample_rate: int, frame_rate: int, non_speech_label: float
+    sample_rate: int,
+    frame_rate: int,
+    non_speech_label: float,
+    smoothing_window_size: int = 30,
 ) -> Callable[[bytes], np.ndarray]:
     import webrtcvad
 
@@ -238,11 +236,9 @@ def _make_webrtcvad_detector(
 
         result = np.array(media_bstring)
 
-        # Fill gaps shorter than 300ms (30 frames at 100 sample_rate)
+        # Fill gaps in speech using smoothing window
         # This matches subtitle characteristics better than raw VAD
-        smoothed = _smooth_vad_output(result, iterations=30)
-
-        return smoothed
+        return _smooth_speech(result, window_size=smoothing_window_size)
 
     return _detect
 
@@ -601,10 +597,12 @@ class VideoSpeechTransformer(TransformerMixin):
         ffmpeg_path: Optional[str] = None,
         ref_stream: Optional[str] = None,
         vlc_mode: bool = False,
+        vad_smoothing_window: int = 30,
     ) -> None:
         super().__init__()
         self.vad: str = vad
         self.sample_rate: int = sample_rate
+        self.vad_smoothing_window: int = vad_smoothing_window
         # TEN VAD requires 16 kHz input. If selected, force 16kHz for extraction.
         if "tenvad" in vad and frame_rate != 16000:
             logger.info(
@@ -687,7 +685,10 @@ class VideoSpeechTransformer(TransformerMixin):
     def _build_detector(self) -> Callable[[bytes], np.ndarray]:
         if "webrtc" in self.vad:
             return _make_webrtcvad_detector(
-                self.sample_rate, self.frame_rate, self._non_speech_label
+                self.sample_rate,
+                self.frame_rate,
+                self._non_speech_label,
+                self.vad_smoothing_window,
             )
         if "auditok" in self.vad:
             return _make_auditok_detector(
@@ -707,7 +708,10 @@ class VideoSpeechTransformer(TransformerMixin):
                     "TEN VAD unavailable (%s); falling back to WebRTC VAD.", exc
                 )
                 return _make_webrtcvad_detector(
-                    self.sample_rate, self.frame_rate, self._non_speech_label
+                    self.sample_rate,
+                    self.frame_rate,
+                    self._non_speech_label,
+                    self.vad_smoothing_window,
                 )
         raise ValueError(f"unknown vad: {self.vad}")
 

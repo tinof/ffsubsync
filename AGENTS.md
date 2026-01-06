@@ -119,8 +119,7 @@ binary strings -> FFTAligner -> time offset -> SubtitleShifter -> synchronized o
 
 Backends supported:
 - `webrtcvad-wheels` (default path: `--vad=webrtc`): Voice-specific detection
-- `auditok` (`--vad=auditok`) [optional extra]: Energy/audio activity detector. Install with `pip install ffsubsync[auditok]`. Note: we keep `auditok<0.3.0` to avoid the newer PyAudio/portaudio build requirement on CI.
-- `TEN VAD` (`--vad=tenvad` or `--vad=subs_then_tenvad`) [optional extra]: Low-latency, lightweight, high-accuracy streaming VAD. Requires 16 kHz audio; ffsubsync auto-sets `--frame-rate` to 16000 when selected. Install with `pip install ffsubsync[tenvad]`. If TEN VAD is not installed, the code falls back to WebRTC.
+- `TEN VAD` (`--vad=tenvad` or `--vad=subs_then_tenvad`) [optional extra]: Low-latency, lightweight, high-accuracy streaming VAD. Requires 16 kHz audio; ffsubsync auto-sets `--frame-rate` to 16000 when selected. Install with `pip install ffsubsync[tenvad]` (Linux x64/macOS) or `pip install ffsubsync[tenvad-onnx]` (ARM64). If TEN VAD is not installed, the code falls back to WebRTC.
 
 ## Code Quality Standards
 
@@ -150,7 +149,7 @@ All stages must pass for PR approval.
 - `numpy`: FFT computations and array processing
 - `srt`, `pysubs2`: Subtitle format parsing
 - `webrtcvad-wheels`: Voice activity detection (default)
-- Optional VAD backends: `auditok` (install with extra `auditok`), `ten-vad` (install with extra `tenvad`)
+- Optional VAD backends: `ten-vad` (install with extra `tenvad`), `onnxruntime` (install with extra `tenvad-onnx` for ARM64)
 - `rich`, `tqdm`: CLI output formatting
 - `chardet`, `charset_normalizer`, `faust-cchardet`: Character encoding detection
 
@@ -169,7 +168,7 @@ All stages must pass for PR approval.
 ## Common Development Workflows
 
 ### Adding a new VAD backend
-1. Add detector function in `speech_transformers.py` (follow `_make_auditok_detector` pattern)
+1. Add detector function in `speech_transformers.py` (follow `_make_webrtcvad_detector` pattern)
 2. Register in `VideoSpeechTransformer.__init__` VAD selection logic
 3. Add to `constants.py` if needed
 4. Update tests in `tests/`
@@ -185,7 +184,7 @@ All stages must pass for PR approval.
 - Check `--max-offset-seconds` if offset > 60s
 - Try `--no-fix-framerate` to assume identical framerates
 - Try `--gss` for exhaustive framerate ratio search
-- Try `--vad=auditok` for low-quality audio
+- Try `--vad=tenvad` for potentially better accuracy (requires extra install)
 
 ## Testing Notes
 

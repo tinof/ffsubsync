@@ -660,10 +660,6 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
         choices=[
             "subs_then_webrtc",
             "webrtc",
-            "subs_then_auditok",
-            "auditok",
-            "subs_then_silero",
-            "silero",
             "subs_then_tenvad",
             "tenvad",
             "whisper",

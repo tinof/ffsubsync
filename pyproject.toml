@@ -62,13 +62,6 @@ dev = [
     "types-requests",
     "versioneer",
 ]
-auditok = [
-    # Keep auditok optional to avoid PyAudio/portaudio build requirements
-    # The 0.3.x series introduces a hard dependency on PyAudio which fails
-    # to build on CI runners without system headers. Older versions work
-    # for our usage (energy-based activity detection).
-    "auditok<0.3.0",
-]
 tenvad = [
     # TEN VAD Python bindings (requires 16 kHz input)
     # Install from git due to broken PyPI package (as per TEN-VAD official docs)
@@ -79,13 +72,6 @@ tenvad-onnx = [
     # TEN VAD ONNX backend for ARM64 and platforms without prebuilt libs
     # Requires ONNX Runtime 1.17.1+ (officially supports ARM64 Linux)
     "onnxruntime>=1.17.1",
-]
-silero = [
-    # Silero VAD ONNX backend for high-accuracy speech detection
-    # Better music/speech discrimination than WebRTC/TEN
-    # Requires 16 kHz input, uses stateful ONNX model
-    "onnxruntime>=1.17.1",
-    "requests",
 ]
 
 [project.urls]

@@ -147,7 +147,6 @@ binary strings -> FFTAligner -> time offset -> SubtitleShifter -> synchronized o
 
 Backends supported:
 - `webrtcvad-wheels` (default path: `--vad=webrtc`): Voice-specific detection
-- `auditok` (`--vad=auditok`) [optional extra]: Energy/audio activity detector. Install with `pip install ffsubsync[auditok]`. Note: we keep `auditok<0.3.0` to avoid the newer PyAudio/portaudio build requirement on CI.
 - `TEN VAD` (`--vad=tenvad` or `--vad=subs_then_tenvad`) [optional extra]: Low-latency, lightweight, high-accuracy VAD. Requires 16 kHz audio; ffsubsync auto-sets `--frame-rate` to 16000 when selected.
   - **Native backend**: Install with `pip install ffsubsync[tenvad]`. **Platform support:** Linux x64 and macOS only (does NOT support Linux ARM64/aarch64).
   - **ONNX backend** (new): Install with `pip install ffsubsync[tenvad-onnx]`. **Platform support:** All platforms including Linux ARM64. Uses ONNX Runtime for inference. Slightly slower than native but widely compatible.
@@ -221,7 +220,7 @@ All stages must pass for PR approval.
 - `numpy`: FFT computations and array processing
 - `srt`, `pysubs2`: Subtitle format parsing
 - `webrtcvad-wheels`: Voice activity detection (default)
-- Optional VAD backends: `auditok` (install with extra `auditok`), `ten-vad` (install with extra `tenvad`)
+- Optional VAD backends: `ten-vad` (install with extra `tenvad`), `onnxruntime` (install with extra `tenvad-onnx` for ARM64)
 - `rich`, `tqdm`: CLI output formatting
 - `chardet`, `charset_normalizer`, `faust-cchardet`: Character encoding detection
 
@@ -240,7 +239,7 @@ All stages must pass for PR approval.
 ## Common Development Workflows
 
 ### Adding a new VAD backend
-1. Add detector function in `speech_transformers.py` (follow `_make_auditok_detector` pattern)
+1. Add detector function in `speech_transformers.py` (follow `_make_webrtcvad_detector` pattern)
 2. Register in `VideoSpeechTransformer.__init__` VAD selection logic
 3. Add to `constants.py` if needed
 4. Update tests in `tests/`
@@ -256,7 +255,7 @@ All stages must pass for PR approval.
 - Check `--max-offset-seconds` if offset > 60s
 - Try `--no-fix-framerate` to assume identical framerates
 - Try `--gss` for exhaustive framerate ratio search
-- Try `--vad=auditok` for low-quality audio
+- Try `--vad=tenvad` for potentially better accuracy (requires extra install)
 
 ## Testing Notes
 

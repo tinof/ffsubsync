@@ -68,7 +68,7 @@ def main():
         print("Usage: python verify_offset.py <synced_file.srt> <reference_file.srt>")
         print("\nExample:")
         print(
-            "  python verify_offset.py output_silero.srt test-data/ty/..fi.ref-synced-from-gr.srt"
+            "  python verify_offset.py output_webrtc.srt test-data/ty/..fi.ref-synced-from-gr.srt"
         )
         sys.exit(1)
 

@@ -69,8 +69,15 @@ def test_tenvad_fallback_to_webrtc(monkeypatch):
 
     called = {}
 
-    def fake_webrtc(sample_rate, frame_rate, non_speech_label):
-        called["args"] = (sample_rate, frame_rate, non_speech_label)
+    def fake_webrtc(
+        sample_rate, frame_rate, non_speech_label, vad_smoothing_window=None
+    ):
+        called["args"] = (
+            sample_rate,
+            frame_rate,
+            non_speech_label,
+            vad_smoothing_window,
+        )
         return lambda data: np.zeros(1, dtype=float)
 
     monkeypatch.setattr(

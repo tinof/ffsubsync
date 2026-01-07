@@ -10,7 +10,33 @@ FFsubsync
 [![Documentation Status](https://readthedocs.org/projects/ffsubsync/badge/?version=latest)](https://ffsubsync.readthedocs.io/en/latest/?badge=latest)
 [![PyPI Version](https://img.shields.io/pypi/v/ffsubsync.svg)](https://pypi.org/project/ffsubsync)
 
-## 🎯 Fork Highlights: ARM64 Support with ONNX-based TEN VAD
+## 🎯 Fork Highlights
+
+This fork extends ffsubsync with features for handling difficult real-world subtitle sync cases.
+
+### ✨ NEW: Piecewise Sync for Mid-File Drift
+
+Standard ffsubsync applies a **single global offset** which fails when subtitles drift mid-file due to:
+- Different video edits (commercial breaks removed differently)
+- Subtitles from different source releases
+- Non-linear timing differences between translations
+
+**Piecewise Sync** solves this with a multi-phase algorithm:
+1. **Ratio-based time warping** - Maps source timeline proportionally to reference
+2. **Local offset correction** - Finds optimal offset per 60-second window
+3. **Smooth interpolation** - Blends corrections to avoid jarring jumps
+
+```bash
+# Sync Finnish subtitles using French reference (extracted from MKV)
+python -m ffsubsync.tools.piecewise_sync french.srt finnish.srt synced_finnish.srt --verify
+
+# With custom window size (30 seconds)
+python -m ffsubsync.tools.piecewise_sync --window 30000 reference.srt input.srt output.srt
+```
+
+**Real-world result**: Improved sync from ~60% to **98%+ within 1 second** of reference.
+
+### ARM64 Support with ONNX-based TEN VAD
 
 This fork adds **ONNX Runtime-based TEN VAD** support, enabling high-accuracy voice activity detection on **ARM64/aarch64 platforms** (Oracle Cloud, AWS Graviton, Raspberry Pi, etc.) where the native TEN VAD binaries are not available.
 
@@ -306,20 +332,30 @@ down to O(n log n).
 
 Limitations
 -----------
-In most cases, inconsistencies between video and subtitles occur when starting
-or ending segments present in video are not present in subtitles, or vice versa.
-This can occur, for example, when a TV episode recap in the subtitles was pruned
-from video. FFsubsync typically works well in these cases, and in my experience
-this covers >95% of use cases. Handling breaks and splits outside of the beginning
-and ending segments is left to future work (see below).
+The standard `ffs` command applies a **single global offset and scale factor**, which works well when:
+- Subtitles are consistently offset throughout the file
+- The framerate mismatch is uniform (e.g., PAL ↔ NTSC conversion)
+
+This covers >95% of use cases. However, it may fail when:
+- Subtitles drift mid-file (different video edits, commercial breaks removed differently)
+- Translations have different segmentation (lines split/combined differently)
+- Source subtitles are from a completely different release
+
+**Solution**: Use the **Piecewise Sync** tool for these difficult cases:
+```bash
+python -m ffsubsync.tools.piecewise_sync reference.srt input.srt output.srt --verify
+```
+
+See the [Fork Highlights](#-fork-highlights) section for details.
 
 Future Work
 -----------
-Besides general stability and usability improvements, one line
-of work aims to extend the synchronization algorithm to handle splits
-/ breaks in the middle of video not present in subtitles (or vice versa).
-Developing a robust solution will take some time (assuming one is possible).
-See [#10](https://github.com/smacke/ffsubsync/issues/10) for more details.
+Besides general stability and usability improvements, areas of ongoing development include:
+- Integration of piecewise sync into the main `ffs` CLI (currently available as separate tool)
+- Automatic detection of when piecewise sync is needed
+- Scene-break detection for even more precise anchor points
+
+See [#10](https://github.com/smacke/ffsubsync/issues/10) for the original discussion on handling mid-file splits.
 
 History
 -------

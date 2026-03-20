@@ -108,8 +108,12 @@ make typecheck    # Run mypy
 1. **Discretization**: Both video audio and subtitles are discretized into 10ms windows
 2. **Speech Detection**:
    - Subtitles: Check if any subtitle is "on" during each window
-   - Audio: Use VAD (WebRTC or Auditok) to detect speech presence
+   - Audio: Use VAD (WebRTC or TEN-VAD) to detect speech presence
 3. **Alignment**: Use FFT-based convolution (O(n log n)) to find optimal alignment between binary strings
+
+### VAD Selection Logic
+
+The default VAD is `subs_then_webrtc`, which first attempts subtitle-based alignment (faster), then falls back to WebRTC audio-based VAD if needed. When using TEN-VAD (`--vad=tenvad` or `--vad=subs_then_tenvad`), the frame rate is automatically set to 16000 Hz as required by TEN-VAD.
 
 ### Key Components
 
@@ -122,10 +126,12 @@ make typecheck    # Run mypy
 - `aligners.py`: FFT-based and max-score alignment algorithms
   - `FFTAligner`: Fast convolution-based alignment using numpy FFT
   - `MaxScoreAligner`: Evaluates multiple framerate ratios to find best alignment
+  - `SegmentedAligner`: Handles alignment with segmented/split content
 - `speech_transformers.py`: Video/audio speech extraction transformers
   - `VideoSpeechTransformer`: Extract speech from video using ffmpeg + VAD
   - `SubtitleSpeechTransformer`: Convert subtitles to speech timeline
   - `DeserializeSpeechTransformer`: Load pre-serialized speech data
+  - `WhisperSpeechTransformer`: Extract speech using Whisper-based transcription
 - `subtitle_transformers.py`: Subtitle manipulation transformers
   - `SubtitleScaler`: Scale subtitle timing by framerate ratio
   - `SubtitleShifter`: Apply time offset to subtitles

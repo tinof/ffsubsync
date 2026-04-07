@@ -18,3 +18,10 @@ ssync
 /test-data/ty
 .fastembed_cache
 .DS_Store
+
+# Local AI/dev assistant workspace artifacts
+.serena/
+.agents/
+.opencode/
+.codex/
+.claude/

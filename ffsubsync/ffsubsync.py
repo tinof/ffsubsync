@@ -10,7 +10,12 @@ from typing import Any, Callable, Optional, Union, cast
 
 import numpy as np
 
-from ffsubsync.aligners import FFTAligner, MaxScoreAligner, SegmentedAligner
+from ffsubsync.aligners import (
+    FFTAligner,
+    FailedToFindAlignmentException,
+    MaxScoreAligner,
+    SegmentedAligner,
+)
 from ffsubsync.constants import (
     DEFAULT_APPLY_OFFSET_SECONDS,
     DEFAULT_ENCODING,
@@ -117,6 +122,103 @@ def get_framerate_ratios_to_try(args: argparse.Namespace) -> list[Optional[float
         return framerate_ratios
 
 
+def get_alignment_strategies(
+    args: argparse.Namespace,
+) -> list[tuple[str, bool, bool]]:
+    """
+    Return alignment strategies as tuples of
+    (strategy_name, use_gss, use_segmented_aligner).
+
+    Primary strategy follows explicit CLI args.
+    Adaptive strategy (if enabled) escalates to segmented aligner and enables
+    GSS unless framerate fixing was explicitly disabled.
+    """
+
+    auto_sync_enabled = getattr(args, "auto_sync", True)
+
+    strategies: list[tuple[str, bool, bool]] = [
+        ("primary", args.gss, args.use_segmented_aligner)
+    ]
+    if not auto_sync_enabled:
+        return strategies
+
+    adaptive_gss = False if args.no_fix_framerate else True
+    adaptive = ("adaptive", adaptive_gss, True)
+    if adaptive[1:] != strategies[0][1:]:
+        strategies.append(adaptive)
+    return strategies
+
+
+def compute_alignment(
+    args: argparse.Namespace,
+    srtin: Optional[str],
+    reference_pipe: Optional[Pipeline],
+    srt_pipe_maker: Callable[
+        [Optional[float]], Union[Pipeline, Callable[[float], Pipeline]]
+    ],
+    reference_speech: np.ndarray,
+    use_gss: bool,
+    use_segmented_aligner: bool,
+) -> tuple[float, int, Pipeline]:
+    skip_infer_framerate_ratio = (
+        args.skip_infer_framerate_ratio or reference_pipe is None
+    )
+
+    framerate_ratios = get_framerate_ratios_to_try(
+        argparse.Namespace(**override(args, gss=use_gss))
+    )
+    srt_pipes = [srt_pipe_maker(1.0)] + [
+        srt_pipe_maker(rat) for rat in framerate_ratios
+    ]
+
+    for srt_pipe in srt_pipes:
+        if callable(srt_pipe):
+            continue
+        srt_pipe.fit(srtin)
+
+    if (
+        not skip_infer_framerate_ratio
+        and reference_pipe is not None
+        and hasattr(reference_pipe[-1], "num_frames")
+    ):
+        inferred_framerate_ratio_from_length = (
+            float(reference_pipe[-1].num_frames)
+            / cast(Pipeline, srt_pipes[0])[-1].num_frames
+        )
+        logger.info(
+            "inferred frameratio ratio: %.3f", inferred_framerate_ratio_from_length
+        )
+        srt_pipes.append(
+            cast(Pipeline, srt_pipe_maker(inferred_framerate_ratio_from_length)).fit(
+                srtin
+            )
+        )
+        logger.info("...done")
+
+    aligner_class: Union[type[FFTAligner], type[SegmentedAligner]]
+    aligner_kwargs: dict[str, Any]
+    if use_segmented_aligner:
+        aligner_class = SegmentedAligner
+        aligner_kwargs = {
+            "window_size_seconds": args.segment_window,
+            "overlap_seconds": args.segment_overlap,
+            # Note: sample_rate default is 100 (matches SAMPLE_RATE)
+        }
+    else:
+        aligner_class = FFTAligner
+        aligner_kwargs = {}
+
+    (best_score, offset_samples), best_srt_pipe = MaxScoreAligner(
+        aligner_class,
+        srtin,
+        SAMPLE_RATE,
+        args.max_offset_seconds,
+        **aligner_kwargs,
+    ).fit_transform(reference_speech, srt_pipes)
+
+    return best_score, offset_samples, best_srt_pipe
+
+
 def try_sync(
     args: argparse.Namespace, reference_pipe: Optional[Pipeline], result: dict[str, Any]
 ) -> bool:
@@ -131,63 +233,78 @@ def try_sync(
     for srtin in args.srtin:
         try:
             skip_sync = args.skip_sync or reference_pipe is None
-            skip_infer_framerate_ratio = (
-                args.skip_infer_framerate_ratio or reference_pipe is None
-            )
             srtout = srtin if args.overwrite_input else args.srtout
             srt_pipe_maker = get_srt_pipe_maker(args, srtin)
-            framerate_ratios = get_framerate_ratios_to_try(args)
-            srt_pipes = [srt_pipe_maker(1.0)] + [
-                srt_pipe_maker(rat) for rat in framerate_ratios
-            ]
-            for srt_pipe in srt_pipes:
-                if callable(srt_pipe):
-                    continue
-                else:
-                    srt_pipe.fit(srtin)
-            if not skip_infer_framerate_ratio and hasattr(
-                reference_pipe[-1], "num_frames"
-            ):
-                inferred_framerate_ratio_from_length = (
-                    float(reference_pipe[-1].num_frames)
-                    / cast(Pipeline, srt_pipes[0])[-1].num_frames
-                )
-                logger.info(
-                    f"inferred frameratio ratio: {inferred_framerate_ratio_from_length:.3f}"
-                )
-                srt_pipes.append(
-                    cast(
-                        Pipeline, srt_pipe_maker(inferred_framerate_ratio_from_length)
-                    ).fit(srtin)
-                )
-                logger.info("...done")
             logger.info("computing alignments...")
             if skip_sync:
                 best_score = 0.0
-                best_srt_pipe = cast(Pipeline, srt_pipes[0])
+                best_srt_pipe = cast(Pipeline, srt_pipe_maker(1.0).fit(srtin))
                 offset_samples = 0
             else:
-                # Choose aligner based on CLI flag
-                if args.use_segmented_aligner:
-                    aligner_class = SegmentedAligner
-                    aligner_kwargs = {
-                        "window_size_seconds": args.segment_window,
-                        "overlap_seconds": args.segment_overlap,
-                        # Note: sample_rate will use default of 100 (matches SAMPLE_RATE)
-                    }
-                else:
-                    aligner_class = FFTAligner
-                    aligner_kwargs = {}  # FFTAligner doesn't need extra kwargs
+                if reference_pipe is None:
+                    raise ValueError("reference_pipe is required when sync is enabled")
 
-                (best_score, offset_samples), best_srt_pipe = MaxScoreAligner(
-                    aligner_class,
-                    srtin,
-                    SAMPLE_RATE,
-                    args.max_offset_seconds,
-                    **aligner_kwargs,
-                ).fit_transform(
-                    reference_pipe.transform(args.reference),
-                    srt_pipes,
+                reference_speech = reference_pipe.transform(args.reference)
+                strategies = get_alignment_strategies(args)
+                strategy_results: list[
+                    tuple[str, bool, bool, float, int, Pipeline]
+                ] = []
+
+                for strategy_name, use_gss, use_segmented_aligner in strategies:
+                    logger.info(
+                        "alignment strategy: %s (gss=%s, segmented=%s)",
+                        strategy_name,
+                        use_gss,
+                        use_segmented_aligner,
+                    )
+                    try:
+                        score, offset, subpipe = compute_alignment(
+                            args,
+                            srtin,
+                            reference_pipe,
+                            srt_pipe_maker,
+                            reference_speech,
+                            use_gss,
+                            use_segmented_aligner,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "alignment strategy '%s' failed: %s",
+                            strategy_name,
+                            e,
+                        )
+                        continue
+
+                    strategy_results.append(
+                        (
+                            strategy_name,
+                            use_gss,
+                            use_segmented_aligner,
+                            score,
+                            offset,
+                            subpipe,
+                        )
+                    )
+
+                if len(strategy_results) == 0:
+                    raise FailedToFindAlignmentException(
+                        "No alignment strategy succeeded"
+                    )
+
+                (
+                    selected_strategy,
+                    selected_gss,
+                    selected_segmented,
+                    best_score,
+                    offset_samples,
+                    best_srt_pipe,
+                ) = max(strategy_results, key=lambda item: item[3])
+                logger.info(
+                    "selected strategy: %s (gss=%s, segmented=%s, score=%.3f)",
+                    selected_strategy,
+                    selected_gss,
+                    selected_segmented,
+                    best_score,
                 )
             if best_score < 0:
                 sync_was_successful = False
@@ -719,6 +836,15 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="If specified, use golden-section search to try to find"
         "the optimal framerate ratio between video and subtitles.",
+    )
+    parser.add_argument(
+        "--no-auto-sync",
+        dest="auto_sync",
+        action="store_false",
+        default=True,
+        help="Disable adaptive auto-sync strategy selection. "
+        "By default, ffsubsync evaluates additional robust strategies and "
+        "selects the best-scoring result.",
     )
     parser.add_argument(
         "--use-segmented-aligner",

@@ -219,7 +219,10 @@ If you choose to install without TEN VAD (no extras), ffsubsync will fall back t
 
 Usage
 -----
-After installation, three CLI commands are available: `ffs`, `subsync`, and `ffsubsync` (all are equivalent):
+After installation, four CLI commands are available:
+
+- `ffs`, `subsync`, and `ffsubsync` (equivalent low-level CLI)
+- `ssync` (convenience wrapper that auto-discovers subtitle files by language suffix)
 
 Supported subtitle formats: `.srt`, `.ass/.ssa`, MicroDVD `.sub`, and `.vtt`. MicroDVD frame rates are preserved when converting back to `.sub`.
 
@@ -251,6 +254,30 @@ python -m ffsubsync video.mp4 -i unsynchronized.srt -o synchronized.srt
 ~~~
 The tool uses the file extension to decide whether to perform voice activity
 detection on the audio or to directly extract speech from an srt file.
+
+### `ssync` convenience command
+
+`ssync` is a helper that takes only the video path, auto-finds the matching subtitle file in the same directory, and runs sync in-place.
+
+Default behavior:
+- Looks for `<video_basename>.fin.srt` (case-insensitive language suffix matching)
+- Syncs subtitle against the video
+- Writes output back to the same subtitle file
+
+Examples:
+
+~~~bash
+# default language suffix: .fin.srt
+ssync "The Family Next Door (AU) (2025) - S01E04 - Fran [WEBRip-1080p][EAC3 5.1][x264]-CBFM.mkv"
+
+# different language suffix
+ssync --lang eng "Episode.mkv"
+
+# preview resolved paths only
+ssync --dry-run "Episode.mkv"
+~~~
+
+Tip: Always quote filenames that contain spaces or parentheses.
 
 Platform Support
 ----------------

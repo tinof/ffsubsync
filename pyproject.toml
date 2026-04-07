@@ -83,6 +83,7 @@ Issues = "https://github.com/smacke/ffsubsync/issues"
 ffsubsync = "ffsubsync:main"
 ffs = "ffsubsync:main"
 subsync = "ffsubsync:main"
+ssync = "ffsubsync.ssync:main"
 
 [tool.setuptools]
 packages = ["ffsubsync"]

@@ -5,14 +5,15 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable, Optional, Union, cast
+from typing import Any, cast
 
 import numpy as np
 
 from ffsubsync.aligners import (
-    FFTAligner,
     FailedToFindAlignmentException,
+    FFTAligner,
     MaxScoreAligner,
     SegmentedAligner,
 )
@@ -30,6 +31,7 @@ from ffsubsync.constants import (
     SUBTITLE_EXTENSIONS,
 )
 from ffsubsync.ffmpeg_utils import ffmpeg_bin_path
+from ffsubsync.preflight import check_already_synced
 from ffsubsync.sklearn_shim import Pipeline, TransformerMixin
 from ffsubsync.speech_transformers import (
     DeserializeSpeechTransformer,
@@ -50,14 +52,14 @@ def override(args: argparse.Namespace, **kwargs: Any) -> dict[str, Any]:
     return args_dict
 
 
-def _ref_format(ref_fname: Optional[str]) -> Optional[str]:
+def _ref_format(ref_fname: str | None) -> str | None:
     if ref_fname is None:
         return None
     return ref_fname[-3:]
 
 
 def make_test_case(
-    args: argparse.Namespace, npy_savename: Optional[str], sync_was_successful: bool
+    args: argparse.Namespace, npy_savename: str | None, sync_was_successful: bool
 ) -> int:
     if npy_savename is None:
         raise ValueError("need non-null npy_savename")
@@ -80,7 +82,7 @@ def make_test_case(
             shutil.copy(npy_savename, tar_dir)
         else:
             shutil.move(npy_savename, tar_dir)
-        supported_formats = set(next(zip(*shutil.get_archive_formats())))
+        supported_formats = set(next(zip(*shutil.get_archive_formats(), strict=False)))
         preferred_formats = ["gztar", "bztar", "xztar", "zip", "tar"]
         for archive_format in preferred_formats:
             if archive_format in supported_formats:
@@ -99,8 +101,8 @@ def make_test_case(
 
 
 def get_srt_pipe_maker(
-    args: argparse.Namespace, srtin: Optional[str]
-) -> Callable[[Optional[float]], Union[Pipeline, Callable[[float], Pipeline]]]:
+    args: argparse.Namespace, srtin: str | None
+) -> Callable[[float | None], Pipeline | Callable[[float], Pipeline]]:
     srtin_format = "srt" if srtin is None else os.path.splitext(srtin)[-1][1:]
     parser = make_subtitle_parser(fmt=srtin_format, caching=True, **args.__dict__)
     return lambda scale_factor: make_subtitle_speech_pipeline(
@@ -108,7 +110,7 @@ def get_srt_pipe_maker(
     )
 
 
-def get_framerate_ratios_to_try(args: argparse.Namespace) -> list[Optional[float]]:
+def get_framerate_ratios_to_try(args: argparse.Namespace) -> list[float | None]:
     if args.no_fix_framerate:
         return []
     else:
@@ -142,7 +144,7 @@ def get_alignment_strategies(
     if not auto_sync_enabled:
         return strategies
 
-    adaptive_gss = False if args.no_fix_framerate else True
+    adaptive_gss = not args.no_fix_framerate
     adaptive = ("adaptive", adaptive_gss, True)
     if adaptive[1:] != strategies[0][1:]:
         strategies.append(adaptive)
@@ -151,11 +153,9 @@ def get_alignment_strategies(
 
 def compute_alignment(
     args: argparse.Namespace,
-    srtin: Optional[str],
-    reference_pipe: Optional[Pipeline],
-    srt_pipe_maker: Callable[
-        [Optional[float]], Union[Pipeline, Callable[[float], Pipeline]]
-    ],
+    srtin: str | None,
+    reference_pipe: Pipeline | None,
+    srt_pipe_maker: Callable[[float | None], Pipeline | Callable[[float], Pipeline]],
     reference_speech: np.ndarray,
     use_gss: bool,
     use_segmented_aligner: bool,
@@ -195,7 +195,7 @@ def compute_alignment(
         )
         logger.info("...done")
 
-    aligner_class: Union[type[FFTAligner], type[SegmentedAligner]]
+    aligner_class: type[FFTAligner] | type[SegmentedAligner]
     aligner_kwargs: dict[str, Any]
     if use_segmented_aligner:
         aligner_class = SegmentedAligner
@@ -220,7 +220,7 @@ def compute_alignment(
 
 
 def try_sync(
-    args: argparse.Namespace, reference_pipe: Optional[Pipeline], result: dict[str, Any]
+    args: argparse.Namespace, reference_pipe: Pipeline | None, result: dict[str, Any]
 ) -> bool:
     result["sync_was_successful"] = False
     sync_was_successful = True
@@ -234,6 +234,38 @@ def try_sync(
         try:
             skip_sync = args.skip_sync or reference_pipe is None
             srtout = srtin if args.overwrite_input else args.srtout
+
+            # Preflight: fast check whether the subtitle is already in sync.
+            if (
+                not skip_sync
+                and getattr(args, "preflight", False)
+                and srtin is not None
+                and args.reference is not None
+            ):
+                already_synced, preflight_offset = check_already_synced(
+                    args.reference, srtin, args
+                )
+                if already_synced:
+                    srt_pipe_maker = get_srt_pipe_maker(args, srtin)
+                    best_srt_pipe = cast(Pipeline, srt_pipe_maker(1.0).fit(srtin))
+                    offset_seconds = (
+                        preflight_offset or 0.0
+                    ) + args.apply_offset_seconds
+                    scale_step = best_srt_pipe.named_steps["scale"]
+                    logger.info("score: preflight")
+                    logger.info("offset seconds: %.3f", offset_seconds)
+                    logger.info("framerate scale factor: %.3f", scale_step.scale_factor)
+                    output_pipe = Pipeline([("shift", SubtitleShifter(offset_seconds))])
+                    out_subs = output_pipe.fit_transform(scale_step.subs_)
+                    if args.output_encoding != "same":
+                        out_subs = out_subs.set_encoding(args.output_encoding)
+                    logger.info("writing output to {}".format(srtout or "stdout"))
+                    out_subs.write_file(srtout)
+                    result["offset_seconds"] = offset_seconds
+                    result["framerate_scale_factor"] = scale_step.scale_factor
+                    result["sync_was_successful"] = True
+                    continue
+
             srt_pipe_maker = get_srt_pipe_maker(args, srtin)
             logger.info("computing alignments...")
             if skip_sync:
@@ -273,6 +305,11 @@ def try_sync(
                             strategy_name,
                             e,
                         )
+                        logger.debug(
+                            "alignment strategy '%s' traceback:",
+                            strategy_name,
+                            exc_info=True,
+                        )
                         continue
 
                     strategy_results.append(
@@ -286,10 +323,41 @@ def try_sync(
                         )
                     )
 
+                    # A4: If primary found near-zero offset, the subtitle is
+                    # already aligned — skip remaining (more expensive) strategies.
+                    if (
+                        strategy_name == "primary"
+                        and abs(offset / float(SAMPLE_RATE)) < 0.2
+                    ):
+                        logger.info(
+                            "Primary strategy found near-zero offset (%.3fs); "
+                            "skipping remaining strategies",
+                            abs(offset / float(SAMPLE_RATE)),
+                        )
+                        break
+
                 if len(strategy_results) == 0:
                     raise FailedToFindAlignmentException(
                         "No alignment strategy succeeded"
                     )
+
+                # A3: Require adaptive to beat primary by a meaningful margin.
+                # Raw scores from different aligners are not directly comparable,
+                # so we bias toward the simpler (primary) result when the margin
+                # is small, to avoid drift from spurious adaptive wins.
+                primary_results = [r for r in strategy_results if r[0] == "primary"]
+                if primary_results and len(strategy_results) > 1:
+                    primary_score = primary_results[0][3]
+                    non_primary = [r for r in strategy_results if r[0] != "primary"]
+                    best_adaptive_score = max(r[3] for r in non_primary)
+                    if best_adaptive_score < primary_score * 1.15:
+                        logger.info(
+                            "Adaptive score (%.0f) does not exceed primary score (%.0f) "
+                            "by required 15%% margin; keeping primary result",
+                            best_adaptive_score,
+                            primary_score,
+                        )
+                        strategy_results = primary_results
 
                 (
                     selected_strategy,
@@ -544,7 +612,7 @@ def validate_file_permissions(args: argparse.Namespace) -> None:
 
 def _setup_logging(
     args: argparse.Namespace,
-) -> tuple[Optional[str], Optional[logging.FileHandler]]:
+) -> tuple[str | None, logging.FileHandler | None]:
     log_handler = None
     log_path = None
     if args.make_test_case or args.log_dir_path is not None:
@@ -589,8 +657,8 @@ def _run_impl(args: argparse.Namespace, result: dict[str, Any]) -> bool:
 
 
 def validate_and_transform_args(
-    parser_or_args: Union[argparse.ArgumentParser, argparse.Namespace],
-) -> Optional[argparse.Namespace]:
+    parser_or_args: argparse.ArgumentParser | argparse.Namespace,
+) -> argparse.Namespace | None:
     if isinstance(parser_or_args, argparse.Namespace):
         parser = None
         args = parser_or_args
@@ -621,7 +689,7 @@ def validate_and_transform_args(
 
 
 def run(
-    parser_or_args: Union[argparse.ArgumentParser, argparse.Namespace],
+    parser_or_args: argparse.ArgumentParser | argparse.Namespace,
 ) -> dict[str, Any]:
     sync_was_successful = False
     result = {
@@ -872,6 +940,16 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
         "--strict",
         action="store_true",
         help="If specified, refuse to parse srt files with formatting issues.",
+    )
+    parser.add_argument(
+        "--preflight",
+        "--skip-if-synced",
+        action="store_true",
+        default=False,
+        help="If specified, do a fast pre-check using only the first ~2 minutes "
+        "of audio. If the subtitle appears already in sync (offset ≤ 500ms with "
+        "confident score), skip the full pipeline. Abstains for silent intros. "
+        "Default: off.",
     )
     parser.add_argument("--vlc-mode", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--skip-sync", action="store_true", help=argparse.SUPPRESS)

@@ -1,11 +1,10 @@
 import argparse
+import contextlib
 import locale
 import sys
 from pathlib import Path
-from typing import Optional
 
 from ffsubsync.ffsubsync import make_parser, run
-
 
 DEFAULT_SUB_LANG = "fin"
 SUBTITLE_EXT = "srt"
@@ -29,20 +28,33 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print resolved paths and ffsubsync arguments without running sync",
     )
+    parser.add_argument(
+        "--preflight",
+        "--skip-if-synced",
+        action="store_true",
+        default=False,
+        help="Run a fast pre-check (~2 min of audio). Skip full sync if subtitle "
+        "appears already aligned. Default: off.",
+    )
     return parser
 
 
 def _candidate_subtitle_paths(video_path: Path, lang: str) -> list[Path]:
     stem = video_path.with_suffix("")
-    lower_lang = lang.lower()
-    return [
-        Path(f"{stem}.{lang}.{SUBTITLE_EXT}"),
-        Path(f"{stem}.{lower_lang}.{SUBTITLE_EXT}"),
-        Path(f"{stem}.{lang.upper()}.{SUBTITLE_EXT}"),
-    ]
+    # Deduplicate while preserving order so case variants don't double-match
+    # on case-insensitive filesystems (e.g. macOS default HFS+).
+    seen: set[str] = set()
+    candidates: list[Path] = []
+    for variant in (lang, lang.lower(), lang.upper()):
+        p = Path(f"{stem}.{variant}.{SUBTITLE_EXT}")
+        key = str(p).casefold()
+        if key not in seen:
+            seen.add(key)
+            candidates.append(p)
+    return candidates
 
 
-def _find_subtitle(video_path: Path, lang: str) -> Optional[Path]:
+def _find_subtitle(video_path: Path, lang: str) -> Path | None:
     for candidate in _candidate_subtitle_paths(video_path, lang):
         if candidate.exists() and candidate.is_file():
             return candidate
@@ -63,11 +75,8 @@ def main() -> int:
     args = parser.parse_args()
 
     lang = args.lang or DEFAULT_SUB_LANG
-    try:
+    with contextlib.suppress(Exception):
         locale.setlocale(locale.LC_ALL, "")
-    except Exception:
-        # Keep going with default C locale if unavailable
-        pass
 
     video = Path(args.video)
     _print(f"Processing subtitles for {video.name} (Language: {lang})")
@@ -82,6 +91,10 @@ def main() -> int:
         return 0
 
     output = _resolve_output_path(subtitle)
+    ffsubsync_extra: list[str] = []
+    if args.preflight:
+        ffsubsync_extra.append("--preflight")
+
     ffsubsync_args = make_parser().parse_args(
         [
             str(video),
@@ -91,6 +104,7 @@ def main() -> int:
             str(output),
             "--output-encoding",
             "same",
+            *ffsubsync_extra,
         ]
     )
 

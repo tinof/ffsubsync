@@ -4,7 +4,7 @@ import os
 import sys
 from collections.abc import Iterator
 from datetime import timedelta
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 import pysubs2
 import srt
@@ -82,10 +82,10 @@ class GenericSubtitlesFile:
         self.subs_: list[GenericSubtitle] = subs
         self._sub_format: str = sub_format
         self._encoding: str = encoding
-        self._styles: Optional[dict[str, pysubs2.SSAStyle]] = kwargs.pop("styles", None)
-        self._fonts_opaque: Optional[dict[str, Any]] = kwargs.pop("fonts_opaque", None)
-        self._info: Optional[dict[str, str]] = kwargs.pop("info", None)
-        self._fps: Optional[float] = kwargs.pop("fps", None)
+        self._styles: dict[str, pysubs2.SSAStyle] | None = kwargs.pop("styles", None)
+        self._fonts_opaque: dict[str, Any] | None = kwargs.pop("fonts_opaque", None)
+        self._info: dict[str, str] | None = kwargs.pop("info", None)
+        self._fps: float | None = kwargs.pop("fps", None)
 
     def set_encoding(self, encoding: str) -> "GenericSubtitlesFile":
         if encoding != "same":
@@ -175,8 +175,8 @@ class GenericSubtitlesFile:
 
 
 class SubsMixin:
-    def __init__(self, subs: Optional[GenericSubtitlesFile] = None) -> None:
-        self.subs_: Optional[GenericSubtitlesFile] = subs
+    def __init__(self, subs: GenericSubtitlesFile | None = None) -> None:
+        self.subs_: GenericSubtitlesFile | None = subs
 
     def set_encoding(self, encoding: str) -> "SubsMixin":
         self.subs_.set_encoding(encoding)

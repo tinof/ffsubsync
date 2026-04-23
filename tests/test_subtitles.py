@@ -42,7 +42,7 @@ def test_start_seconds(start_seconds):
         for sub in parser_zero.subs_
         if sub.start >= timedelta(seconds=start_seconds)
     ]
-    assert all(esub == psub for esub, psub in zip(expected, parser.subs_))
+    assert all(esub == psub for esub, psub in zip(expected, parser.subs_, strict=False))
 
 
 @pytest.mark.parametrize("max_seconds", [1, 1.5, 2.0, 2.5])
@@ -72,7 +72,7 @@ def test_offset(offset):
     offseter = SubtitleShifter(offset)
     pipe = make_pipeline(parser, offseter)
     pipe.fit(BytesIO(fake_srt))
-    for sub_orig, sub_offset in zip(parser.subs_, offseter.subs_):
+    for sub_orig, sub_offset in zip(parser.subs_, offseter.subs_, strict=False):
         assert (
             abs(
                 sub_offset.start.total_seconds()
@@ -106,7 +106,7 @@ def test_speech_extraction(sample_rate, start_seconds):
         * (bitstring_cumsum != np.cumsum(bitstring_shifted_right))
     )[0]
     prev = 0
-    for pos, sub in zip(consec_ones_end_pos, parser.subs_):
+    for pos, sub in zip(consec_ones_end_pos, parser.subs_, strict=False):
         start = round(sub.start.total_seconds() * sample_rate)
         duration = sub.end.total_seconds() - sub.start.total_seconds()
         stop = start + round(duration * sample_rate)

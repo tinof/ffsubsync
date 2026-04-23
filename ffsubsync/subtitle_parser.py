@@ -1,18 +1,18 @@
 import logging
 from datetime import timedelta
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 try:
     import cchardet
-except:
+except ImportError:
     cchardet = None
 try:
     import chardet
-except:
+except ImportError:
     chardet = None
 try:
     import charset_normalizer
-except:
+except ImportError:
     charset_normalizer = None
 import pysubs2
 import srt
@@ -32,7 +32,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 def _preprocess_subs(
     subs,
-    max_subtitle_seconds: Optional[int] = None,
+    max_subtitle_seconds: int | None = None,
     start_seconds: int = 0,
     tolerant: bool = True,
 ) -> list[GenericSubtitle]:
@@ -69,18 +69,18 @@ class GenericSubtitleParser(SubsMixin, TransformerMixin):
         fmt: str = "srt",
         encoding: str = "infer",
         caching: bool = False,
-        max_subtitle_seconds: Optional[int] = None,
+        max_subtitle_seconds: int | None = None,
         start_seconds: int = 0,
         skip_ssa_info: bool = False,
         strict: bool = False,
     ) -> None:
-        super(self.__class__, self).__init__()
+        super().__init__()
         self.sub_format: str = fmt
         self.encoding: str = encoding
         self.caching: bool = caching
-        self.fit_fname: Optional[str] = None
-        self.detected_encoding_: Optional[str] = None
-        self.max_subtitle_seconds: Optional[int] = max_subtitle_seconds
+        self.fit_fname: str | None = None
+        self.detected_encoding_: str | None = None
+        self.max_subtitle_seconds: int | None = max_subtitle_seconds
         self.start_seconds: int = start_seconds
         # FIXME: hack to get tests to pass; remove
         self._skip_ssa_info: bool = skip_ssa_info
@@ -97,15 +97,19 @@ class GenericSubtitleParser(SubsMixin, TransformerMixin):
                 if chardet_lib is not None:
                     try:
                         detected_encoding = cast(
-                            Optional[str], chardet_lib.detect(subs)["encoding"]
+                            str | None, chardet_lib.detect(subs)["encoding"]
                         )
-                    except:
+                    except Exception:
                         continue
                     if detected_encoding is not None:
                         self.detected_encoding_ = detected_encoding
                         encodings_to_try = (detected_encoding,)
                         break
-            assert self.detected_encoding_ is not None
+            if self.detected_encoding_ is None:
+                raise RuntimeError(
+                    "Could not detect encoding for subtitle file. "
+                    "Try specifying --encoding explicitly."
+                )
             logger.info(f"detected encoding: {self.detected_encoding_}")
         exc = None
         for encoding in encodings_to_try:
@@ -155,7 +159,11 @@ class GenericSubtitleParser(SubsMixin, TransformerMixin):
             except Exception as e:
                 exc = e
                 continue
-        raise exc
+        if exc is not None:
+            raise exc
+        raise RuntimeError(
+            f"Could not parse subtitle file '{fname}' with any tried encoding."
+        )
 
     def transform(self, *_) -> GenericSubtitlesFile:
         return self.subs_

@@ -1,10 +1,10 @@
 import logging
 import math
 from collections import defaultdict
-from typing import Optional, Union
 
 import numpy as np
 
+from ffsubsync.constants import FRAMERATE_RATIOS, FRAMERATE_SNAP_TOLERANCE
 from ffsubsync.golden_section_search import gss
 from ffsubsync.sklearn_shim import Pipeline, TransformerMixin
 
@@ -15,16 +15,21 @@ logger: logging.Logger = logging.getLogger(__name__)
 MIN_FRAMERATE_RATIO = 0.9
 MAX_FRAMERATE_RATIO = 1.1
 
+# All known valid framerate ratios and their reciprocals, plus 1.0.
+_KNOWN_FRAMERATE_RATIOS: list[float] = (
+    [1.0] + list(FRAMERATE_RATIOS) + [1.0 / r for r in FRAMERATE_RATIOS]
+)
+
 
 class FailedToFindAlignmentException(Exception):
     pass
 
 
 class FFTAligner(TransformerMixin):
-    def __init__(self, max_offset_samples: Optional[int] = None) -> None:
-        self.max_offset_samples: Optional[int] = max_offset_samples
-        self.best_offset_: Optional[int] = None
-        self.best_score_: Optional[float] = None
+    def __init__(self, max_offset_samples: int | None = None) -> None:
+        self.max_offset_samples: int | None = max_offset_samples
+        self.best_offset_: int | None = None
+        self.best_score_: float | None = None
         self.get_score_: bool = False
 
     def _eliminate_extreme_offsets_from_solutions(
@@ -69,7 +74,7 @@ class FFTAligner(TransformerMixin):
         self.get_score_ = get_score
         return self
 
-    def transform(self, *_) -> Union[int, tuple[float, int]]:
+    def transform(self, *_) -> int | tuple[float, int]:
         if self.get_score_:
             return self.best_score_, self.best_offset_
         else:
@@ -85,27 +90,33 @@ class SegmentedAligner(TransformerMixin):
     voting to find the consensus offset. This approach is more robust
     against false positives (e.g., intro music) that can mislead global
     alignment.
+
+    A result is only accepted when a strict majority of windows (> 50%)
+    agree on the offset bin. If no majority is reached, raises
+    FailedToFindAlignmentException so the caller can fall back to a
+    simpler strategy.
     """
 
     def __init__(
         self,
-        max_offset_samples: Optional[int] = None,
-        window_size_seconds: int = 600,  # 10 minutes default
-        overlap_seconds: int = 300,  # 5 minutes overlap
-        sample_rate: int = 100,  # From constants.SAMPLE_RATE
-        tolerance_seconds: float = 0.5,  # Bin tolerance for voting
+        max_offset_samples: int | None = None,
+        window_size_seconds: int = 600,
+        overlap_seconds: int = 300,
+        sample_rate: int = 100,
+        tolerance_seconds: float = 0.5,
     ) -> None:
-        self.max_offset_samples: Optional[int] = max_offset_samples
+        self.max_offset_samples: int | None = max_offset_samples
         self.window_size_seconds: int = window_size_seconds
         self.overlap_seconds: int = overlap_seconds
         self.sample_rate: int = sample_rate
         self.tolerance_seconds: float = tolerance_seconds
-        self.best_offset_: Optional[int] = None
-        self.best_score_: Optional[float] = None
+        self.best_offset_: int | None = None
+        self.best_score_: float | None = None
         self.get_score_: bool = False
+        self.confidence_: str = "unknown"
+        self.vote_ratio_: float = 0.0
 
     def fit(self, refstring, substring, get_score: bool = False) -> "SegmentedAligner":
-        # Convert to numpy arrays (same as FFTAligner)
         refstring, substring = [
             list(map(int, s)) if isinstance(s, str) else s
             for s in [refstring, substring]
@@ -114,14 +125,12 @@ class SegmentedAligner(TransformerMixin):
             2 * np.array(s).astype(float) - 1 for s in [refstring, substring]
         )
 
-        # Calculate window parameters in samples
         window_size_samples = int(self.window_size_seconds * self.sample_rate)
         step_size_samples = int(
             (self.window_size_seconds - self.overlap_seconds) * self.sample_rate
         )
         tolerance_samples = int(self.tolerance_seconds * self.sample_rate)
 
-        # Handle short inputs: fall back to single FFTAligner
         if len(refstring) < window_size_samples:
             logger.info(
                 "Input too short for segmented alignment (%d < %d samples), "
@@ -133,10 +142,11 @@ class SegmentedAligner(TransformerMixin):
             fft_aligner.fit(refstring, substring, get_score=get_score)
             self.best_offset_ = fft_aligner.best_offset_
             self.best_score_ = fft_aligner.best_score_
+            self.confidence_ = "high"
+            self.vote_ratio_ = 1.0
             self.get_score_ = get_score
             return self
 
-        # Collect (offset, score) for each window
         window_results: list[tuple[int, float]] = []
 
         logger.info(
@@ -146,14 +156,12 @@ class SegmentedAligner(TransformerMixin):
             self.tolerance_seconds,
         )
 
-        # Slide window across the reference and subtitle strings
         num_windows = 0
         for start_idx in range(
             0, len(refstring) - window_size_samples + 1, step_size_samples
         ):
             end_idx = min(start_idx + window_size_samples, len(refstring))
 
-            # Extract windows
             ref_window = refstring[start_idx:end_idx]
             sub_window = (
                 substring[start_idx:end_idx]
@@ -161,46 +169,42 @@ class SegmentedAligner(TransformerMixin):
                 else substring[start_idx:]
             )
 
-            # Skip if subtitle window is too short
             if len(sub_window) < window_size_samples // 2:
                 continue
 
-            # Align this window
             try:
                 aligner = FFTAligner(max_offset_samples=self.max_offset_samples)
                 aligner.fit(ref_window, sub_window, get_score=True)
 
                 if aligner.best_offset_ is not None and aligner.best_score_ is not None:
-                    # Adjust offset to be relative to the global start (not window start)
-                    global_offset = aligner.best_offset_  # Already relative to window
-                    window_results.append((global_offset, aligner.best_score_))
+                    window_results.append((aligner.best_offset_, aligner.best_score_))
                     num_windows += 1
 
             except Exception as e:
-                logger.warning(f"Failed to align window {num_windows}: {e}")
+                logger.warning("Failed to align window %d: %s", num_windows, e)
                 continue
 
         if len(window_results) == 0:
+            self.confidence_ = "low"
             raise FailedToFindAlignmentException(
                 "Segmented alignment failed: no windows could be aligned"
             )
 
-        logger.info(f"Aligned {num_windows} windows, aggregating results...")
+        logger.info("Aligned %d windows, aggregating results...", num_windows)
 
-        # Bin offsets by tolerance and vote
         offset_bins: defaultdict[int, list[tuple[int, float]]] = defaultdict(list)
 
         for offset, score in window_results:
-            # Find bin center (round to nearest tolerance_samples)
             bin_center = round(offset / tolerance_samples) * tolerance_samples
             offset_bins[bin_center].append((offset, score))
+            logger.debug(
+                "Window offset=%d (bin=%d), score=%.0f", offset, bin_center, score
+            )
 
-        # Vote: count votes per bin
         bin_votes: dict[int, int] = {
             bin_center: len(results) for bin_center, results in offset_bins.items()
         }
 
-        # Find bin(s) with maximum votes
         max_votes = max(bin_votes.values())
         winning_bins = [
             bin_center for bin_center, votes in bin_votes.items() if votes == max_votes
@@ -213,13 +217,28 @@ class SegmentedAligner(TransformerMixin):
             winning_bins,
         )
 
-        # If tie, pick bin with highest cumulative score
+        # Confidence gate: require strict majority (> 50% of windows must agree).
+        min_required_votes = math.ceil(num_windows / 2)
+        if max_votes < min_required_votes:
+            self.confidence_ = "low"
+            self.vote_ratio_ = max_votes / num_windows
+            raise FailedToFindAlignmentException(
+                f"Segmented alignment has low confidence: {max_votes}/{num_windows} windows "
+                f"agreed (need >= {min_required_votes}). Windows proposed widely different offsets."
+            )
+
+        self.vote_ratio_ = max_votes / num_windows
+        if max_votes == num_windows:
+            self.confidence_ = "high"
+        else:
+            self.confidence_ = "medium"
+
         if len(winning_bins) > 1:
             bin_scores = {
                 bin_center: sum(score for _, score in offset_bins[bin_center])
                 for bin_center in winning_bins
             }
-            winning_bin = max(bin_scores, key=bin_scores.get)
+            winning_bin = max(bin_scores, key=lambda b: bin_scores[b])
             logger.info(
                 "Tie broken by score: bin %d selected with cumulative score %.0f",
                 winning_bin,
@@ -228,24 +247,24 @@ class SegmentedAligner(TransformerMixin):
         else:
             winning_bin = winning_bins[0]
 
-        # Aggregate offset and score from winning bin
         winning_results = offset_bins[winning_bin]
         self.best_offset_ = int(np.mean([offset for offset, _ in winning_results]))
         self.best_score_ = np.mean([score for _, score in winning_results])
 
         logger.info(
-            "Consensus: offset=%d samples (%.2fs), score=%.0f from %d/%d windows",
+            "Consensus: offset=%d samples (%.2fs), score=%.0f from %d/%d windows [confidence=%s]",
             self.best_offset_,
             self.best_offset_ / self.sample_rate,
             self.best_score_,
             len(winning_results),
             num_windows,
+            self.confidence_,
         )
 
         self.get_score_ = get_score
         return self
 
-    def transform(self, *_) -> Union[int, tuple[float, int]]:
+    def transform(self, *_) -> int | tuple[float, int]:
         if self.get_score_:
             return self.best_score_, self.best_offset_
         else:
@@ -255,15 +274,15 @@ class SegmentedAligner(TransformerMixin):
 class MaxScoreAligner(TransformerMixin):
     def __init__(
         self,
-        base_aligner: Union[FFTAligner, type[FFTAligner]],
-        srtin: Optional[str] = None,
+        base_aligner: FFTAligner | type[FFTAligner],
+        srtin: str | None = None,
         sample_rate=None,
         max_offset_seconds=None,
         **aligner_kwargs,
     ) -> None:
-        self.srtin: Optional[str] = srtin
+        self.srtin: str | None = srtin
         if sample_rate is None or max_offset_seconds is None:
-            self.max_offset_samples: Optional[int] = None
+            self.max_offset_samples: int | None = None
         else:
             self.max_offset_samples = abs(int(max_offset_seconds * sample_rate))
         if isinstance(base_aligner, type):
@@ -272,10 +291,13 @@ class MaxScoreAligner(TransformerMixin):
             )
         else:
             self.base_aligner = base_aligner
-        self.max_offset_seconds: Optional[int] = max_offset_seconds
+        self.max_offset_seconds: int | None = max_offset_seconds
         self._scores: list[tuple[tuple[float, int], Pipeline]] = []
 
     def fit_gss(self, refstring, subpipe_maker):
+        # Track (score, subpipe, ratio) for post-GSS plausibility check.
+        gss_candidates: list[tuple[tuple[float, int], Pipeline, float]] = []
+
         def opt_func(framerate_ratio, is_last_iter):
             subpipe = subpipe_maker(framerate_ratio)
             substring = subpipe.fit_transform(self.srtin)
@@ -289,15 +311,36 @@ class MaxScoreAligner(TransformerMixin):
                 framerate_ratio,
             )
             if is_last_iter:
-                self._scores.append((score, subpipe))
+                gss_candidates.append((score, subpipe, framerate_ratio))
             return -score[0]
 
         gss(opt_func, MIN_FRAMERATE_RATIO, MAX_FRAMERATE_RATIO)
+
+        # Discard ratios that are not near any known framerate pair.
+        for score, subpipe, ratio in gss_candidates:
+            nearest = min(_KNOWN_FRAMERATE_RATIOS, key=lambda c: abs(ratio - c) / c)
+            rel_err = abs(ratio - nearest) / nearest
+            if rel_err > FRAMERATE_SNAP_TOLERANCE:
+                logger.warning(
+                    "GSS ratio %.4f not near any known framerate pair "
+                    "(closest=%.4f, err=%.2f%%); discarding to avoid drift",
+                    ratio,
+                    nearest,
+                    rel_err * 100,
+                )
+            else:
+                if abs(ratio - nearest) > 1e-6:
+                    logger.info(
+                        "GSS ratio %.4f snapped to known pair %.4f (err=%.3f%%)",
+                        ratio,
+                        nearest,
+                        rel_err * 100,
+                    )
+                self._scores.append((score, subpipe))
+
         return self
 
-    def fit(
-        self, refstring, subpipes: Union[Pipeline, list[Pipeline]]
-    ) -> "MaxScoreAligner":
+    def fit(self, refstring, subpipes: Pipeline | list[Pipeline]) -> "MaxScoreAligner":
         if not isinstance(subpipes, list):
             subpipes = [subpipes]
         for subpipe in subpipes:
@@ -308,14 +351,14 @@ class MaxScoreAligner(TransformerMixin):
                 substring = subpipe.transform(self.srtin)
             else:
                 substring = subpipe
-            self._scores.append(
-                (
-                    self.base_aligner.fit_transform(
-                        refstring, substring, get_score=True
-                    ),
-                    subpipe,
+            try:
+                score = self.base_aligner.fit_transform(
+                    refstring, substring, get_score=True
                 )
-            )
+                self._scores.append((score, subpipe))
+            except FailedToFindAlignmentException as e:
+                logger.debug("Skipping subpipe: low-confidence alignment (%s)", e)
+                continue
         return self
 
     def transform(self, *_) -> tuple[tuple[float, float], Pipeline]:

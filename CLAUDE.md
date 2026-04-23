@@ -8,10 +8,9 @@ FFsubsync is a language-agnostic command-line tool for automatic synchronization
 
 **Supported Platforms**: Linux and macOS only (no Windows support)
 
-**Entry Points**: The tool provides three CLI aliases (all equivalent):
-- `ffsubsync` - Main entry point
-- `ffs` - Short alias
-- `subsync` - Alternative alias
+**Entry Points**: Four CLI commands are installed:
+- `ffsubsync` / `ffs` / `subsync` — low-level CLI (all equivalent, require explicit `-i`/`-o` paths)
+- `ssync` — convenience wrapper that auto-discovers subtitle files by language suffix and syncs in-place
 
 ## Development Commands
 
@@ -113,7 +112,7 @@ make typecheck    # Run mypy
 
 ### VAD Selection Logic
 
-The default VAD is `subs_then_webrtc`, which first attempts subtitle-based alignment (faster), then falls back to WebRTC audio-based VAD if needed. When using TEN-VAD (`--vad=tenvad` or `--vad=subs_then_tenvad`), the frame rate is automatically set to 16000 Hz as required by TEN-VAD.
+The default VAD is `subs_then_webrtc` (`DEFAULT_VAD` in `constants.py`): first attempts subtitle-based alignment (fast, no audio extraction), then falls back to WebRTC audio-based VAD if needed. When using TEN-VAD (`--vad=tenvad` or `--vad=subs_then_tenvad`), the frame rate is automatically set to 16000 Hz as required by TEN-VAD.
 
 ### Key Components
 
@@ -122,13 +121,15 @@ The default VAD is `subs_then_webrtc`, which first attempts subtitle-based align
 - Transformers follow fit/transform pattern for processing data through stages
 
 **Core Modules**:
-- `ffsubsync.py`: Main entry point, CLI argument parsing, orchestration
+- `ffsubsync.py`: Main entry point, CLI argument parsing, orchestration. Includes `get_alignment_strategies()` which runs primary + optional adaptive strategy with a 15% score margin guard (adaptive must exceed primary by ≥15% to override it).
 - `aligners.py`: FFT-based and max-score alignment algorithms
   - `FFTAligner`: Fast convolution-based alignment using numpy FFT
-  - `MaxScoreAligner`: Evaluates multiple framerate ratios to find best alignment
-  - `SegmentedAligner`: Handles alignment with segmented/split content
+  - `SegmentedAligner`: Sliding-window alignment with majority-vote consensus. Requires >50% of windows to agree on an offset bin; raises `FailedToFindAlignmentException` if the confidence gate fails. Exposes `confidence_` (`"high"/"medium"/"low"`) and `vote_ratio_` attributes.
+  - `MaxScoreAligner`: Wraps a base aligner and tries multiple framerate ratios. `fit_gss()` runs golden-section search then discards any resulting ratio that is more than `FRAMERATE_SNAP_TOLERANCE` (0.5%) away from the nearest known physical framerate pair.
+- `preflight.py`: Optional fast pre-sync check. `check_already_synced()` extracts ~2 min of audio, runs WebRTC VAD + FFTAligner, and returns `(True, offset)` if three gates pass (|offset| ≤ 0.5 s, score margin ≥ 1.5x, voiced frames ≥ 5%). Caller skips the full pipeline on `True`.
+- `ssync.py`: `ssync` CLI — auto-discovers `<video>.<lang>.srt` next to the video, resolves output path, and delegates to `run()`. Includes case-insensitive deduplication of candidate paths for macOS HFS+.
 - `speech_transformers.py`: Video/audio speech extraction transformers
-  - `VideoSpeechTransformer`: Extract speech from video using ffmpeg + VAD
+  - `VideoSpeechTransformer`: Extract speech from video using ffmpeg + VAD. Accepts `max_duration_seconds` to cap extraction (used by preflight).
   - `SubtitleSpeechTransformer`: Convert subtitles to speech timeline
   - `DeserializeSpeechTransformer`: Load pre-serialized speech data
   - `WhisperSpeechTransformer`: Extract speech using Whisper-based transcription
@@ -140,7 +141,8 @@ The default VAD is `subs_then_webrtc`, which first attempts subtitle-based align
 - `generic_subtitles.py`: `GenericSubtitle` wrapper for uniform subtitle handling
 - `ffmpeg_utils.py`: FFmpeg integration utilities
 - `golden_section_search.py`: Golden-section search for optimal framerate ratio
-- `constants.py`: Default values and configuration constants
+- `constants.py`: Default values. Key entries: `DEFAULT_VAD = "subs_then_webrtc"`, `FRAMERATE_RATIOS` (known physical pairs), `FRAMERATE_SNAP_TOLERANCE = 0.005` (GSS plausibility threshold), `_KNOWN_FRAMERATE_RATIOS` (expanded set including reciprocals).
+- `tools/piecewise_sync.py`: Standalone piecewise sync tool for mid-file drift. Not integrated into the main CLI — run via `python -m ffsubsync.tools.piecewise_sync`.
 
 **Processing Pipeline Example**:
 ```
@@ -202,7 +204,7 @@ The native `ten-vad` package uses prebuilt binaries (`.so`, `.dll`, `.framework`
 
 **Formatter & Linter**: Ruff (configured in `pyproject.toml`)
 - Line length: 88 characters (Black-compatible)
-- Target Python: 3.9+ (requires Python >= 3.9)
+- Target Python: 3.10+ (requires Python >= 3.10)
 - Pre-commit hooks enforce Ruff checks automatically
 
 **Type Checking**: mypy with type hints preferred
@@ -213,7 +215,7 @@ The native `ten-vad` package uses prebuilt binaries (`.so`, `.dll`, `.framework`
 
 GitHub Actions workflow (`.github/workflows/ci.yml`):
 1. **Code Quality**: Ruff linting and formatting (blocking)
-2. **pipx Installation Test**: Linux/macOS, Python 3.9-3.13
+2. **pipx Installation Test**: Linux/macOS, Python 3.9-3.13 (CI matrix; pyproject requires >=3.10)
 3. **Unit Tests**: Linux/macOS, Python 3.9-3.13
 4. **Integration Tests**: Ubuntu only, Python 3.10-3.11
 
@@ -229,6 +231,8 @@ All stages must pass for PR approval.
 - Optional VAD backends: `ten-vad` (install with extra `tenvad`), `onnxruntime` (install with extra `tenvad-onnx` for ARM64)
 - `rich`, `tqdm`: CLI output formatting
 - `chardet`, `charset_normalizer`, `faust-cchardet`: Character encoding detection
+
+Note: `typing_extensions` is not a dependency — the codebase uses only stdlib `typing` (`Protocol` etc. available since Python 3.8).
 
 **Dev Dependencies**: black, flake8, mypy, pytest, pytest-cov, ruff, twine
 
@@ -262,6 +266,8 @@ All stages must pass for PR approval.
 - Try `--no-fix-framerate` to assume identical framerates
 - Try `--gss` for exhaustive framerate ratio search
 - Try `--vad=tenvad` for potentially better accuracy (requires extra install)
+- Use `python -m ffsubsync.tools.piecewise_sync` for progressive mid-file drift (different video edits, commercial break differences)
+- Use `--preflight` to skip the full pipeline if subtitles may already be in sync
 
 ## Testing Notes
 

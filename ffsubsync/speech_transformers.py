@@ -2,9 +2,10 @@ import io
 import logging
 import subprocess
 import sys
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import timedelta
-from typing import Callable, Optional, Union, cast
+from typing import cast
 
 import ffmpeg
 import numpy as np
@@ -36,7 +37,7 @@ def make_subtitle_speech_pipeline(
     scale_factor: float = DEFAULT_SCALE_FACTOR,
     parser=None,
     **kwargs,
-) -> Union[Pipeline, Callable[[float], Pipeline]]:
+) -> Pipeline | Callable[[float], Pipeline]:
     if parser is None:
         parser = make_subtitle_parser(
             fmt,
@@ -215,7 +216,7 @@ class WhisperSpeechTransformer(TransformerMixin):
         sample_rate: int,
         frame_rate: int,
         start_seconds: int = 0,
-        ffmpeg_path: Optional[str] = None,
+        ffmpeg_path: str | None = None,
         vlc_mode: bool = False,
         max_transcription_seconds: float = 300.0,
     ) -> None:
@@ -223,10 +224,10 @@ class WhisperSpeechTransformer(TransformerMixin):
         self.sample_rate: int = sample_rate
         self.frame_rate: int = frame_rate
         self.start_seconds: int = start_seconds
-        self.ffmpeg_path: Optional[str] = ffmpeg_path
+        self.ffmpeg_path: str | None = ffmpeg_path
         self.vlc_mode: bool = vlc_mode
         self.max_transcription_seconds: float = max_transcription_seconds
-        self.video_speech_results_: Optional[np.ndarray] = None
+        self.video_speech_results_: np.ndarray | None = None
 
     def fit(self, fname: str, *_) -> "WhisperSpeechTransformer":
         try:
@@ -340,11 +341,11 @@ class WhisperSpeechTransformer(TransformerMixin):
 
 class ComputeSpeechFrameBoundariesMixin:
     def __init__(self) -> None:
-        self.start_frame_: Optional[int] = None
-        self.end_frame_: Optional[int] = None
+        self.start_frame_: int | None = None
+        self.end_frame_: int | None = None
 
     @property
-    def num_frames(self) -> Optional[int]:
+    def num_frames(self) -> int | None:
         if self.start_frame_ is None or self.end_frame_ is None:
             return None
         return self.end_frame_ - self.start_frame_
@@ -367,15 +368,17 @@ class VideoSpeechTransformer(TransformerMixin):
         frame_rate: int,
         non_speech_label: float,
         start_seconds: int = 0,
-        ffmpeg_path: Optional[str] = None,
-        ref_stream: Optional[str] = None,
+        ffmpeg_path: str | None = None,
+        ref_stream: str | None = None,
         vlc_mode: bool = False,
         vad_smoothing_window: int = 30,
+        max_duration_seconds: float | None = None,
     ) -> None:
         super().__init__()
         self.vad: str = vad
         self.sample_rate: int = sample_rate
         self.vad_smoothing_window: int = vad_smoothing_window
+        self.max_duration_seconds: float | None = max_duration_seconds
         # TEN VAD requires 16 kHz input. If selected, force 16kHz for extraction.
         if "tenvad" in vad and frame_rate != 16000:
             logger.info(
@@ -394,10 +397,10 @@ class VideoSpeechTransformer(TransformerMixin):
             self.frame_rate: int = frame_rate
         self._non_speech_label: float = non_speech_label
         self.start_seconds: int = start_seconds
-        self.ffmpeg_path: Optional[str] = ffmpeg_path
-        self.ref_stream: Optional[str] = ref_stream
+        self.ffmpeg_path: str | None = ffmpeg_path
+        self.ref_stream: str | None = ref_stream
         self.vlc_mode: bool = vlc_mode
-        self.video_speech_results_: Optional[np.ndarray] = None
+        self.video_speech_results_: np.ndarray | None = None
 
     def try_fit_using_embedded_subs(self, fname: str) -> None:
         embedded_subs = []
@@ -515,6 +518,10 @@ class VideoSpeechTransformer(TransformerMixin):
         ffmpeg_args.extend(["-loglevel", "fatal", "-nostdin", "-i", fname])
         if self.ref_stream is not None and self.ref_stream.startswith("0:a:"):
             ffmpeg_args.extend(["-map", self.ref_stream])
+        if self.max_duration_seconds is not None:
+            ffmpeg_args.extend(["-t", str(self.max_duration_seconds)])
+            if total_duration is not None:
+                total_duration = min(total_duration, self.max_duration_seconds)
         ffmpeg_args.extend(
             [
                 "-f",
@@ -616,8 +623,8 @@ class SubtitleSpeechTransformer(TransformerMixin, ComputeSpeechFrameBoundariesMi
         self.sample_rate: int = sample_rate
         self.start_seconds: int = start_seconds
         self.framerate_ratio: float = framerate_ratio
-        self.subtitle_speech_results_: Optional[np.ndarray] = None
-        self.max_time_: Optional[int] = None
+        self.subtitle_speech_results_: np.ndarray | None = None
+        self.max_time_: int | None = None
 
     def fit(self, subs: list[GenericSubtitle], *_) -> "SubtitleSpeechTransformer":
         max_time = 0
@@ -651,7 +658,7 @@ class DeserializeSpeechTransformer(TransformerMixin):
     def __init__(self, non_speech_label: float) -> None:
         super().__init__()
         self._non_speech_label: float = non_speech_label
-        self.deserialized_speech_results_: Optional[np.ndarray] = None
+        self.deserialized_speech_results_: np.ndarray | None = None
 
     def fit(self, fname, *_) -> "DeserializeSpeechTransformer":
         speech = np.load(fname)

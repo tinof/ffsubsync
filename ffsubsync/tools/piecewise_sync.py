@@ -20,7 +20,6 @@ Usage:
 import argparse
 import re
 from collections import defaultdict
-from typing import Optional
 
 try:
     import numpy as np
@@ -127,7 +126,7 @@ def write_srt(subs: list[dict], filepath: str, encoding: str = "utf-8-sig") -> N
 
 def find_matching_reference(
     input_sub: dict, ref_subs: list[dict], search_window_ms: int = 60000
-) -> tuple[Optional[dict], int]:
+) -> tuple[dict | None, int]:
     """
     Find the reference subtitle that best matches the input subtitle.
 
@@ -266,8 +265,6 @@ def piecewise_sync(
 
     input_start_offset = input_subs[0]["start"]
     ref_start_offset = ref_subs[0]["start"]
-    ref_total_duration / input_total_duration
-
     warped_subs = []
     for sub in input_subs:
         rel_pos = (sub["start"] - input_start_offset) / input_total_duration

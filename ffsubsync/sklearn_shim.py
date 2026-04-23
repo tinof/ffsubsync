@@ -37,10 +37,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
 
 from collections import defaultdict
+from collections.abc import Callable
 from itertools import islice
-from typing import Any, Callable, Optional
-
-from typing_extensions import Protocol
+from typing import Any, Protocol
 
 
 class TransformerProtocol(Protocol):
@@ -53,7 +52,7 @@ class TransformerProtocol(Protocol):
 class TransformerMixin(TransformerProtocol):
     """Mixin class for all transformers."""
 
-    def fit_transform(self, X: Any, y: Optional[Any] = None, **fit_params: Any) -> Any:
+    def fit_transform(self, X: Any, y: Any | None = None, **fit_params: Any) -> Any:
         """
         Fit to data, then transform it.
         Fits transformer to X and y with optional parameters fit_params
@@ -343,7 +342,7 @@ def _name_estimators(estimators):
         for estimator in estimators
     ]
     namecount = defaultdict(int)
-    for _est, name in zip(estimators, names):
+    for _est, name in zip(estimators, names, strict=False):
         namecount[name] += 1
 
     for k, v in list(namecount.items()):
@@ -356,7 +355,7 @@ def _name_estimators(estimators):
             names[i] += f"-{namecount[name]}"
             namecount[name] -= 1
 
-    return list(zip(names, estimators))
+    return list(zip(names, estimators, strict=False))
 
 
 def make_pipeline(*steps, **kwargs) -> Pipeline:

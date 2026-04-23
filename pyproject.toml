@@ -23,7 +23,6 @@ classifiers = [
     "Natural Language :: English",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -33,7 +32,7 @@ classifiers = [
     "Topic :: System :: Systems Administration",
     "Topic :: Utilities",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "chardet",
     "charset_normalizer",
@@ -45,7 +44,6 @@ dependencies = [
     "setuptools",
     "srt>=3.0.0",
     "tqdm",
-    "typing_extensions",
     "webrtcvad-wheels",
 ]
 
@@ -102,14 +100,12 @@ parentdir_prefix = "ffsubsync-"
 
 [tool.black]
 line-length = 88
-target-version = ['py39']
+target-version = ['py310']
 extend-exclude = '(^/versioneer|_version)\.py'
 
 [tool.ruff]
-# Same line length as Black for consistency
 line-length = 88
-# Target Python 3.9+ to match project requirements
-target-version = "py39"
+target-version = "py310"
 
 [tool.ruff.lint]
 # Enable a comprehensive set of rules
@@ -130,7 +126,6 @@ ignore = [
     "E501",  # Ignore line too long errors
     "E722",  # Allow bare except (already used in __init__.py)
     "B008",  # Allow function calls in argument defaults
-    "UP007", # Allow Union syntax instead of | for older Python compatibility
 ]
 
 # Exclude the same files as Black and flake8

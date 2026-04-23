@@ -67,7 +67,7 @@ def gss(f, a, b, tol=1e-4):
             yc = yd
             h = invphi * h
             d = a + invphi * h
-            yd = f(d, k == n - 2)
+            yd = f_wrapped(d, k == n - 2)
 
     if yc < yd:
         return a, d

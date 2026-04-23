@@ -4,6 +4,10 @@ SAMPLE_RATE: int = 100
 
 FRAMERATE_RATIOS: list[float] = [24.0 / 23.976, 25.0 / 23.976, 25.0 / 24.0]
 
+# Maximum relative error allowed when snapping GSS ratio to a known framerate pair.
+# Ratios outside this tolerance are treated as non-physical and discarded.
+FRAMERATE_SNAP_TOLERANCE: float = 0.005
+
 DEFAULT_FRAME_RATE: int = 48000
 DEFAULT_NON_SPEECH_LABEL: float = 0.0
 DEFAULT_ENCODING: str = "infer"

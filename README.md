@@ -10,43 +10,74 @@ FFsubsync
 [![Documentation Status](https://readthedocs.org/projects/ffsubsync/badge/?version=latest)](https://ffsubsync.readthedocs.io/en/latest/?badge=latest)
 [![PyPI Version](https://img.shields.io/pypi/v/ffsubsync.svg)](https://pypi.org/project/ffsubsync)
 
-## 🎯 Fork Highlights
+> **This is a fork of [smacke/ffsubsync](https://github.com/smacke/ffsubsync)** with significant reliability improvements and convenience features added on top of the original. The sections below describe what makes this fork different; the rest of the document covers the tool as a whole.
 
-This fork extends ffsubsync with features for handling difficult real-world subtitle sync cases.
+---
 
-### ✨ NEW: Piecewise Sync for Mid-File Drift
+## What This Fork Adds
 
-Standard ffsubsync applies a **single global offset** which fails when subtitles drift mid-file due to:
-- Different video edits (commercial breaks removed differently)
-- Subtitles from different source releases
-- Non-linear timing differences between translations
+### Robust Alignment Engine (drift fix)
 
-**Piecewise Sync** solves this with a multi-phase algorithm:
-1. **Ratio-based time warping** - Maps source timeline proportionally to reference
-2. **Local offset correction** - Finds optimal offset per 60-second window
-3. **Smooth interpolation** - Blends corrections to avoid jarring jumps
+The original FFT alignment works well for straightforward sync cases, but fails silently on difficult inputs — particularly when the segmented aligner produces noisy, uncorrelated per-window offsets, or when the golden-section framerate search converges to a physically impossible ratio. This fork adds three layers of defence that together prevent the "synced at start, drifts to the end" failure mode:
+
+**Segmented aligner confidence gate** (`aligners.py`): The `SegmentedAligner` now requires a strict majority (>50%) of its sliding windows to agree on the offset. If no majority is reached, it raises `FailedToFindAlignmentException` and the caller falls back rather than silently accepting a noise-derived result.
+
+**Framerate plausibility snap** (`aligners.py`, `constants.py`): After golden-section search (GSS) finds an optimal framerate ratio, the result is checked against all known physical framerate pairs (24/23.976, 25/24, 25/23.976, and their reciprocals). If the GSS ratio is more than 0.5% from the nearest known pair, it is discarded. This prevents non-physical ratios like 0.986 (which produce ~18 s of end-of-file drift over a 22-minute episode) from ever reaching the output.
+
+**Strategy selector margin** (`ffsubsync.py`): When both a primary and an adaptive alignment strategy are tried, the adaptive result must exceed the primary score by at least 15% to override it. Without this guard, a small numerical edge from an incomparable score metric was enough to flip the selection.
+
+### `ssync` — Language-Aware Convenience Wrapper
+
+`ssync` is a single-argument wrapper that finds the subtitle file next to a video automatically and syncs it in-place. You don't need to pass `-i` / `-o` paths.
 
 ```bash
-# Sync Finnish subtitles using French reference (extracted from MKV)
+# Default: finds <video>.fin.srt and syncs it against the video
+ssync "The Collapse (2019) - S01E03 - The Airfield D+6 [Bluray-1080p].mkv"
+
+# Different language suffix
+ssync --lang eng "Episode.mkv"
+
+# Preview resolved paths without running sync
+ssync --dry-run "Episode.mkv"
+```
+
+### `--preflight` — Fast "Already in Sync?" Check
+
+Passing `--preflight` (or `--skip-if-synced`) runs a short probe on the first ~2 minutes of audio before committing to the full extraction pipeline. If the subtitle is already aligned, the full pipeline is skipped entirely and the file is written with a zero shift.
+
+The probe passes three gates: offset ≤ 0.5 s, score margin ≥ 1.5x, and at least 5% voiced frames in the window (so silent intros don't produce false positives). Any gate failing causes preflight to abstain and fall through to the normal pipeline.
+
+```bash
+# With ssync
+ssync --preflight "Episode.mkv"
+
+# With the low-level CLI
+ffs video.mkv -i subtitle.srt -o subtitle.srt --preflight
+```
+
+### Piecewise Sync for Mid-File Drift
+
+When subtitles drift progressively through the file (different video edits, commercial breaks removed differently, or translations from a different release), a single global offset cannot fix the problem. The piecewise sync tool applies a three-phase algorithm:
+
+1. **Ratio-based time warping** — maps source timeline proportionally to reference
+2. **Local offset correction** — finds optimal offset per 60-second window using median filtering
+3. **Smooth interpolation** — blends corrections across window boundaries
+
+```bash
+# Sync Finnish subtitles using French reference (both .srt)
 python -m ffsubsync.tools.piecewise_sync french.srt finnish.srt synced_finnish.srt --verify
 
-# With custom window size (30 seconds)
+# Custom window size (30 seconds)
 python -m ffsubsync.tools.piecewise_sync --window 30000 reference.srt input.srt output.srt
 ```
 
-**Real-world result**: Improved sync from ~60% to **98%+ within 1 second** of reference.
+### ARM64 Support via ONNX TEN-VAD
 
-### ARM64 Support with ONNX-based TEN VAD
+The native `ten-vad` package ships prebuilt binaries only for Linux x64 and macOS. This fork adds an ONNX Runtime-based backend that exposes the same interface on all platforms, including ARM64 Linux (Oracle Cloud, AWS Graviton, Raspberry Pi).
 
-This fork adds **ONNX Runtime-based TEN VAD** support, enabling high-accuracy voice activity detection on **ARM64/aarch64 platforms** (Oracle Cloud, AWS Graviton, Raspberry Pi, etc.) where the native TEN VAD binaries are not available.
-
-**Key Features:**
-- ✅ **ARM64 Compatible**: Works on Linux aarch64 systems
-- ✅ **Automatic Fallback**: Native TEN VAD → ONNX TEN VAD → WebRTC VAD
-- ✅ **Same Accuracy**: Uses official TEN-VAD ONNX model (Apache 2.0)
-- ✅ **Easy Install**: `pipx install "git+https://github.com/tinof/ffsubsync.git#egg=ffsubsync[tenvad-onnx]"`
-
-**Upstream**: This fork is based on [smacke/ffsubsync](https://github.com/smacke/ffsubsync)
+- Install with `pip install ffsubsync[tenvad-onnx]` for all platforms
+- Install with `pip install ffsubsync[tenvad]` for Linux x64 / macOS (native, slightly faster)
+- Falls back automatically: native TEN-VAD → ONNX TEN-VAD → WebRTC
 
 ---
 
@@ -84,92 +115,47 @@ sudo apt install ffmpeg
 **On Linux (CentOS/RHEL/Fedora):**
 ~~~
 sudo dnf install ffmpeg
-# or for older versions: sudo yum install ffmpeg
 ~~~
 
 ### Recommended Installation (pipx)
 
 The recommended way to install ffsubsync is using [pipx](https://pypa.github.io/pipx/), which installs the package in an isolated environment and makes the CLI commands globally available.
 
-This fork is the canonical distribution for our builds and includes **ONNX-based TEN VAD** support for ARM64/aarch64 platforms (Oracle Cloud, AWS Graviton, Raspberry Pi, etc.). Native TEN VAD is available on **Linux x64** and **macOS** (Intel and Apple Silicon).
-
-**ARM64/aarch64 (recommended ONNX backend, stable tag):**
+**ARM64/aarch64 (ONNX backend — all platforms):**
 
 ~~~
 pipx install "ffsubsync[tenvad-onnx] @ git+https://github.com/tinof/ffsubsync@LATEST"
-# Older pipx compatibility:
-pipx install 'git+https://github.com/tinof/ffsubsync@LATEST#egg=ffsubsync[tenvad-onnx]'
 ~~~
 
-**Linux x64 / macOS (native TEN VAD - best performance, stable tag):**
+**Linux x64 / macOS (native TEN VAD — best performance):**
 
 ~~~
 pipx install "ffsubsync[tenvad] @ git+https://github.com/tinof/ffsubsync@LATEST"
-# Older pipx compatibility:
-pipx install 'git+https://github.com/tinof/ffsubsync@LATEST#egg=ffsubsync[tenvad]'
 ~~~
 
-**Development head (master):**
-
-~~~
-pipx install 'git+https://github.com/tinof/ffsubsync@master#egg=ffsubsync[tenvad-onnx]'
-pipx install 'git+https://github.com/tinof/ffsubsync@master#egg=ffsubsync[tenvad]'
-~~~
-
-**Minimal installations** (WebRTC VAD fallback):
+**WebRTC only (no TEN VAD):**
 
 ~~~
 pipx install "git+https://github.com/tinof/ffsubsync.git"
 ~~~
 
+**Development head (master branch):**
+
+~~~
+pipx install 'git+https://github.com/tinof/ffsubsync@master#egg=ffsubsync[tenvad-onnx]'
+~~~
+
 If you already installed without the extra, you can add TEN VAD later:
 
 ~~~
-# ARM64 systems:
+# ARM64:
 pipx inject ffsubsync onnxruntime
 
 # Linux x64 / macOS:
 pipx inject ffsubsync 'ten-vad'
-# If PyPI wheels fail to build on your platform, inject from GitHub instead:
-pipx inject ffsubsync 'ten-vad @ git+https://github.com/TEN-framework/ten-vad.git'
-~~~
-
-If you don't have pipx installed, you can install it first:
-~~~
-pip install pipx
 ~~~
 
 ### Alternative Installation (pip)
-
-You can also install using pip (requires Python >= 3.9):
-
-**From this fork (stable tag, recommended):**
-
-~~~
-# ARM64 / all platforms (ONNX backend)
-pip install "ffsubsync[tenvad-onnx] @ git+https://github.com/tinof/ffsubsync@LATEST"
-# Compatibility fallback:
-pip install 'git+https://github.com/tinof/ffsubsync@LATEST#egg=ffsubsync[tenvad-onnx]'
-
-# Linux x64 / macOS (native TEN VAD)
-pip install "ffsubsync[tenvad] @ git+https://github.com/tinof/ffsubsync@LATEST"
-# Compatibility fallback:
-pip install 'git+https://github.com/tinof/ffsubsync@LATEST#egg=ffsubsync[tenvad]'
-
-# WebRTC only
-pip install "ffsubsync @ git+https://github.com/tinof/ffsubsync@LATEST"
-~~~
-
-**From the latest development branch via Git (pip or pipx both work):**
-
-~~~
-pip install  'git+https://github.com/tinof/ffsubsync@master#egg=ffsubsync[tenvad-onnx]'
-pipx install 'git+https://github.com/tinof/ffsubsync@master#egg=ffsubsync[tenvad-onnx]'
-pip install  'git+https://github.com/tinof/ffsubsync@master#egg=ffsubsync[tenvad]'
-pipx install 'git+https://github.com/tinof/ffsubsync@master#egg=ffsubsync[tenvad]'
-~~~
-
-**From a local clone:**
 
 ~~~bash
 git clone https://github.com/tinof/ffsubsync.git
@@ -185,44 +171,19 @@ pip install ".[tenvad]"
 pip install .
 ~~~
 
-**From a local wheel you built:**
+> **Note on TEN VAD wheels**: on Debian/Ubuntu you may need `sudo apt install libc++1`. If `ten-vad` fails to build on your platform, install without the extra (defaults to WebRTC VAD) or use the ONNX backend instead.
 
-~~~
-pip install "dist/ffsubsync-<version>-py3-none-any.whl[tenvad-onnx]"  # ONNX backend
-pip install "dist/ffsubsync-<version>-py3-none-any.whl[tenvad]"       # native TEN VAD
-pip install "dist/ffsubsync-<version>-py3-none-any.whl"                # WebRTC only
-~~~
-
-> Note on TEN VAD wheels
->
-> - TEN VAD provides Linux x64 Python support and prebuilt libraries; on some
->   platforms a local build may be attempted. If `ten-vad` fails to build, you
->   can either:
->   - install ffsubsync without the extra (defaults to WebRTC VAD), or
->   - inject TEN VAD from GitHub as shown above.
-> - On Debian/Ubuntu, you may need: `sudo apt update && sudo apt install libc++1`.
-
-If you choose to install without TEN VAD (no extras), ffsubsync will fall back to the WebRTC VAD automatically.
-
-**VAD Backend Priority:**
-1. If `ten-vad` is installed → uses native TEN VAD (best performance)
-2. If `onnxruntime` is installed → uses ONNX-based TEN VAD (ARM64 compatible)
-3. Otherwise → falls back to WebRTC VAD automatically
-
-### Verifying TEN VAD is active
-
-- Run once with a video; you should see a log like:
-  `TEN VAD selected: overriding frame_rate ... 16000`.
-- You can also explicitly select it: `--vad=tenvad` or `--vad=subs_then_tenvad`.
-
-**Note:** This tool supports Linux and macOS only. Windows is not supported.
+**VAD Backend Priority (selected automatically):**
+1. `ten-vad` installed → native TEN VAD (best performance, Linux x64/macOS)
+2. `onnxruntime` installed → ONNX TEN VAD (ARM64 compatible)
+3. Otherwise → WebRTC VAD (always available)
 
 Usage
 -----
 After installation, four CLI commands are available:
 
-- `ffs`, `subsync`, and `ffsubsync` (equivalent low-level CLI)
-- `ssync` (convenience wrapper that auto-discovers subtitle files by language suffix)
+- `ffs`, `subsync`, `ffsubsync` — equivalent low-level CLI (pass full paths explicitly)
+- `ssync` — convenience wrapper that auto-discovers subtitle files by language suffix
 
 Supported subtitle formats: `.srt`, `.ass/.ssa`, MicroDVD `.sub`, and `.vtt`. MicroDVD frame rates are preserved when converting back to `.sub`.
 
@@ -231,19 +192,7 @@ Supported subtitle formats: `.srt`, `.ass/.ssa`, MicroDVD `.sub`, and `.vtt`. Mi
 ffs video.mp4 -i unsynchronized.srt -o synchronized.srt
 ~~~
 
-**Using any of the three command aliases:**
-~~~
-subsync video.mp4 -i unsynchronized.srt -o synchronized.srt
-ffsubsync video.mp4 -i unsynchronized.srt -o synchronized.srt
-~~~
-
 **Synchronization using reference subtitles:**
-There may be occasions where you have a correctly synchronized srt file in a
-language you are unfamiliar with, as well as an unsynchronized srt file in your
-native language. In this case, you can use the correctly synchronized srt file
-directly as a reference for synchronization, instead of using the video as the
-reference:
-
 ~~~
 ffs reference.srt -i unsynchronized.srt -o synchronized.srt
 ~~~
@@ -252,73 +201,74 @@ ffs reference.srt -i unsynchronized.srt -o synchronized.srt
 ~~~
 python -m ffsubsync video.mp4 -i unsynchronized.srt -o synchronized.srt
 ~~~
+
 The tool uses the file extension to decide whether to perform voice activity
 detection on the audio or to directly extract speech from an srt file.
 
 ### `ssync` convenience command
 
-`ssync` is a helper that takes only the video path, auto-finds the matching subtitle file in the same directory, and runs sync in-place.
+`ssync` takes only the video path, auto-finds the matching subtitle file in the same directory, and syncs it in-place.
 
 Default behavior:
 - Looks for `<video_basename>.fin.srt` (case-insensitive language suffix matching)
 - Syncs subtitle against the video
 - Writes output back to the same subtitle file
 
-Examples:
-
 ~~~bash
-# default language suffix: .fin.srt
-ssync "The Family Next Door (AU) (2025) - S01E04 - Fran [WEBRip-1080p][EAC3 5.1][x264]-CBFM.mkv"
+# Default language suffix: .fin.srt
+ssync "The Family Next Door (AU) (2025) - S01E04 - Fran [WEBRip-1080p].mkv"
 
-# different language suffix
+# Different language suffix
 ssync --lang eng "Episode.mkv"
 
-# preview resolved paths only
+# Preview resolved paths only
 ssync --dry-run "Episode.mkv"
+
+# Skip full pipeline if subtitles appear already in sync
+ssync --preflight "Episode.mkv"
 ~~~
 
-Tip: Always quote filenames that contain spaces or parentheses.
+Always quote filenames that contain spaces or parentheses.
 
 Platform Support
 ----------------
-This tool is designed for command-line usage and supports:
 - **Linux** (all major distributions)
 - **macOS** (Intel and Apple Silicon)
 
-**Note:** Windows is not supported in this version. The tool is optimized for Unix-like systems.
+Windows is not supported. The tool requires Unix-like systems.
 
 Requirements
 ------------
-- **Python:** 3.8 or higher
+- **Python:** 3.10 or higher
 - **ffmpeg:** Must be installed and available in your system PATH
-- **Dependencies:** All Python dependencies are automatically installed during package installation
+- **Dependencies:** All Python dependencies are installed automatically
 
 Sync Issues
 -----------
 If the sync fails, the following recourses are available:
-- Try to sync assuming identical video / subtitle framerates by passing
-  `--no-fix-framerate`;
-- Try passing `--gss` to use [golden-section search](https://en.wikipedia.org/wiki/Golden-section_search)
-  to find the optimal ratio between video and subtitle framerates (by default,
-  only a few common ratios are evaluated);
-- Try a value of `--max-offset-seconds` greater than the default of 60, in the
-  event that the subtitles are out of sync by more than 60 seconds (empirically
-  unlikely in practice, but possible).
-- The default voice activity detector is TEN VAD for low-latency, high-accuracy speech detection. Use `--vad=webrtc` if you prefer the legacy WebRTC backend.
+- Try `--no-fix-framerate` to assume identical video / subtitle framerates
+- Try `--gss` to use [golden-section search](https://en.wikipedia.org/wiki/Golden-section_search) for the optimal framerate ratio (by default, only common ratios are evaluated)
+- Try a larger `--max-offset-seconds` (default: 60) if the subtitles are very far out of sync
+- Try `--vad=tenvad` for higher-accuracy speech detection (requires the `tenvad` or `tenvad-onnx` extra)
 
-If the sync still fails, consider trying one of the following similar tools:
-- [sc0ty/subsync](https://github.com/sc0ty/subsync): does speech-to-text and looks for matching word morphemes
-- [kaegi/alass](https://github.com/kaegi/alass): rust-based subtitle synchronizer with a fancy dynamic programming algorithm
-- [tympanix/subsync](https://github.com/tympanix/subsync): neural net based approach that optimizes directly for alignment when performing speech detection
-- [oseiskar/autosubsync](https://github.com/oseiskar/autosubsync): performs speech detection with bespoke spectrogram + logistic regression
-- [pums974/srtsync](https://github.com/pums974/srtsync): similar approach to ffsubsync (WebRTC's VAD + FFT to maximize signal cross correlation)
+For progressive mid-file drift that survives the above flags, use the **Piecewise Sync** tool described in the [What This Fork Adds](#what-this-fork-adds) section above.
+
+If sync still fails, similar tools worth trying:
+- [sc0ty/subsync](https://github.com/sc0ty/subsync): speech-to-text + word morpheme matching
+- [kaegi/alass](https://github.com/kaegi/alass): Rust-based subtitle synchronizer with dynamic programming
+- [tympanix/subsync](https://github.com/tympanix/subsync): neural net approach
+- [oseiskar/autosubsync](https://github.com/oseiskar/autosubsync): spectrogram + logistic regression
+- [pums974/srtsync](https://github.com/pums974/srtsync): similar approach (WebRTC + FFT)
 
 Speed
 -----
 `ffsubsync` usually finishes in 20 to 30 seconds, depending on the length of
-the video. The most expensive step is actually extraction of raw audio. If you
-already have a correctly synchronized "reference" srt file (in which case audio
-extraction can be skipped), `ffsubsync` typically runs in less than a second.
+the video. The most expensive step is raw audio extraction. If you already have
+a correctly synchronized reference srt file (so audio extraction can be skipped),
+ffsubsync typically runs in under a second.
+
+With `--preflight`, already-synced files are detected in a few seconds without
+running the full pipeline.
 
 VAD Benchmarks
 --------------
@@ -330,59 +280,35 @@ Performance comparison of different synchronization methods:
 | audio-webrtc | 30.8s | 62,669 | 0.11s |
 | audio-tenvad | 30.5s | 62,669 | 0.11s |
 
-**Notes:** WebRTC and TEN-VAD have identical accuracy. Sub-to-sub (using a
-reference subtitle file) is fastest but slightly less accurate than audio-based
-synchronization.
+WebRTC and TEN-VAD have identical accuracy. Sub-to-sub (using a reference subtitle
+file) is fastest but slightly less accurate than audio-based synchronization.
 
 How It Works
 ------------
 The synchronization algorithm operates in 3 steps:
 1. Discretize both the video file's audio stream and the subtitles into 10ms
    windows.
-2. For each 10ms window, determine whether that window contains speech.  This
-   is trivial to do for subtitles (we just determine whether any subtitle is
-   "on" during each time window); for the audio stream, ffsubsync uses the
-   [TEN VAD](https://github.com/TEN-framework/ten-vad) backend by default (if installed), but
-   you can switch to WebRTC (`--vad=webrtc`). If TEN VAD is not installed, WebRTC is used.
-3. Now we have two binary strings: one for the subtitles, and one for the
-   video.  Try to align these strings by matching 0's with 0's and 1's with
-   1's. We score these alignments as (# video 1's matched w/ subtitle 1's) - (#
-   video 1's matched with subtitle 0's).
-
-The best-scoring alignment from step 3 determines how to offset the subtitles
-in time so that they are properly synced with the video. Because the binary
-strings are fairly long (millions of digits for video longer than an hour), the
-naive O(n^2) strategy for scoring all alignments is unacceptable. Instead, we
-use the fact that "scoring all alignments" is a convolution operation and can
-be implemented with the Fast Fourier Transform (FFT), bringing the complexity
-down to O(n log n).
+2. For each 10ms window, determine whether that window contains speech. This is
+   trivial for subtitles (any subtitle "on" during the window counts). For
+   audio, the default VAD is WebRTC; pass `--vad=tenvad` or
+   `--vad=subs_then_tenvad` to use TEN VAD instead (requires the `tenvad` or
+   `tenvad-onnx` extra).
+3. Align the resulting binary strings using FFT-based convolution (O(n log n))
+   to find the offset that maximises matched speech frames.
 
 Limitations
 -----------
-The standard `ffs` command applies a **single global offset and scale factor**, which works well when:
-- Subtitles are consistently offset throughout the file
-- The framerate mismatch is uniform (e.g., PAL ↔ NTSC conversion)
+The `ffs` command applies a **single global offset and scale factor**, which works
+well when subtitles are consistently offset throughout the file or the framerate
+mismatch is uniform. It may fail for:
+- Mid-file drift (different video edits, commercial breaks removed differently)
+- Translations with very different segmentation (lines split/combined differently)
+- Subtitles from a completely different source release
 
-This covers >95% of use cases. However, it may fail when:
-- Subtitles drift mid-file (different video edits, commercial breaks removed differently)
-- Translations have different segmentation (lines split/combined differently)
-- Source subtitles are from a completely different release
-
-**Solution**: Use the **Piecewise Sync** tool for these difficult cases:
+Use the **Piecewise Sync** tool for these cases:
 ```bash
 python -m ffsubsync.tools.piecewise_sync reference.srt input.srt output.srt --verify
 ```
-
-See the [Fork Highlights](#-fork-highlights) section for details.
-
-Future Work
------------
-Besides general stability and usability improvements, areas of ongoing development include:
-- Integration of piecewise sync into the main `ffs` CLI (currently available as separate tool)
-- Automatic detection of when piecewise sync is needed
-- Scene-break detection for even more precise anchor points
-
-See [#10](https://github.com/smacke/ffsubsync/issues/10) for the original discussion on handling mid-file splits.
 
 History
 -------
@@ -395,6 +321,7 @@ Credits
 This project would not be possible without the following libraries:
 - [ffmpeg](https://www.ffmpeg.org/) and the [ffmpeg-python](https://github.com/kkroening/ffmpeg-python) wrapper, for extracting raw audio from video
 - VAD from [webrtc](https://webrtc.org/) and the [py-webrtcvad](https://github.com/wiseman/py-webrtcvad) wrapper, for speech detection
+- [TEN VAD](https://github.com/TEN-framework/ten-vad) for high-accuracy, low-latency voice activity detection
 - [srt](https://pypi.org/project/srt/) for operating on [SRT files](https://en.wikipedia.org/wiki/SubRip#SubRip_text_file_format)
 - [numpy](http://www.numpy.org/) and, indirectly, [FFTPACK](https://www.netlib.org/fftpack/), which powers the FFT-based algorithm for fast scoring of alignments between subtitles (or subtitles and video)
 - Other excellent Python libraries like [argparse](https://docs.python.org/3/library/argparse.html), [rich](https://github.com/willmcgugan/rich), and [tqdm](https://tqdm.github.io/), not related to the core functionality, but which enable much better experiences for developers and users.

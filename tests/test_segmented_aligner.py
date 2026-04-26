@@ -74,6 +74,31 @@ class TestSegmentedAlignerHighAgreement:
 class TestSegmentedAlignerLowAgreement:
     """Windows disagree → raise FailedToFindAlignmentException."""
 
+    def test_two_window_split_vote_raises(self, monkeypatch):
+        """A 1/2 split is not a strict majority."""
+        offsets = iter([0, 100])
+
+        class FakeFFTAligner:
+            def __init__(self, *_, **__):
+                self.best_offset_ = None
+                self.best_score_ = None
+
+            def fit(self, *_, **__):
+                self.best_offset_ = next(offsets)
+                self.best_score_ = 1000.0
+                return self
+
+        monkeypatch.setattr("ffsubsync.aligners.FFTAligner", FakeFFTAligner)
+
+        aligner = SegmentedAligner(
+            window_size_seconds=10,
+            overlap_seconds=0,
+            sample_rate=100,
+            tolerance_seconds=0.5,
+        )
+        with pytest.raises(FailedToFindAlignmentException, match="low confidence"):
+            aligner.fit(np.ones(2000), np.ones(2000))
+
     def test_all_windows_disagree_raises(self):
         """Each window proposes a wildly different offset → rejected."""
         # Build ref: three segments back-to-back (3000 samples = 3x 10s windows at 100 Hz)
@@ -148,6 +173,41 @@ class TestSegmentedAlignerShortInput:
         ).fit_transform(ref, sub)
 
         assert seg_result == fft_result
+
+
+class TestSegmentedAlignerWindowCoverage:
+    """Segmented alignment should cover the tail of the reference."""
+
+    def test_adds_tail_window_when_step_does_not_land_on_end(self, monkeypatch):
+        """A final tail window can turn an early split into a strict majority."""
+        offsets = iter([0, 100, 100])
+        calls = []
+
+        class FakeFFTAligner:
+            def __init__(self, *_, **__):
+                self.best_offset_ = None
+                self.best_score_ = None
+
+            def fit(self, ref_window, *_, **__):
+                calls.append(len(ref_window))
+                self.best_offset_ = next(offsets)
+                self.best_score_ = 1000.0
+                return self
+
+        monkeypatch.setattr("ffsubsync.aligners.FFTAligner", FakeFFTAligner)
+
+        aligner = SegmentedAligner(
+            window_size_seconds=10,
+            overlap_seconds=0,
+            sample_rate=100,
+            tolerance_seconds=0.5,
+        )
+        aligner.fit(np.ones(2500), np.ones(2500), get_score=True)
+
+        assert calls == [1000, 1000, 1000]
+        assert aligner.best_offset_ == 100
+        assert aligner.vote_ratio_ == pytest.approx(2 / 3)
+        assert aligner.confidence_ == "medium"
 
 
 class TestMaxScoreAlignerLowConfidenceHandling:

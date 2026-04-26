@@ -62,6 +62,34 @@ class TestGSSRatioSnap:
         """FRAMERATE_SNAP_TOLERANCE is 0.5% as documented."""
         assert abs(FRAMERATE_SNAP_TOLERANCE - 0.005) < 1e-9
 
+    def test_snapped_gss_ratio_is_re_evaluated(self, monkeypatch):
+        """When GSS lands near a known ratio, use the known ratio pipeline."""
+        import ffsubsync.aligners as aligners
+
+        def fake_gss(func, *_):
+            func(1.0004, True)
+
+        class FakeAligner:
+            def fit_transform(self, _refstring, substring, get_score=False):
+                return float(substring[0]), int(substring[0])
+
+        class FakePipe:
+            def __init__(self, ratio):
+                self.ratio = ratio
+
+            def fit_transform(self, _srtin):
+                return np.array([round(self.ratio * 1000)])
+
+        monkeypatch.setattr(aligners, "gss", fake_gss)
+
+        max_score_aligner = aligners.MaxScoreAligner(FakeAligner(), srtin="subs.srt")
+        max_score_aligner.fit_gss(np.ones(10), FakePipe)
+
+        ((score, offset), subpipe) = max_score_aligner._scores[0]
+        assert subpipe.ratio == 1.0
+        assert score == 1000.0
+        assert offset == 1000
+
 
 # ── Strategy selection margin tests ─────────────────────────────────────────
 

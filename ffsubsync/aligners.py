@@ -147,6 +147,9 @@ class SegmentedAligner(TransformerMixin):
             self.get_score_ = get_score
             return self
 
+        if step_size_samples <= 0:
+            raise ValueError("segment overlap must be smaller than segment window")
+
         window_results: list[tuple[int, float]] = []
 
         logger.info(
@@ -157,9 +160,12 @@ class SegmentedAligner(TransformerMixin):
         )
 
         num_windows = 0
-        for start_idx in range(
-            0, len(refstring) - window_size_samples + 1, step_size_samples
-        ):
+        last_start_idx = len(refstring) - window_size_samples
+        window_starts = list(range(0, last_start_idx + 1, step_size_samples))
+        if window_starts[-1] != last_start_idx:
+            window_starts.append(last_start_idx)
+
+        for start_idx in window_starts:
             end_idx = min(start_idx + window_size_samples, len(refstring))
 
             ref_window = refstring[start_idx:end_idx]
@@ -218,7 +224,7 @@ class SegmentedAligner(TransformerMixin):
         )
 
         # Confidence gate: require strict majority (> 50% of windows must agree).
-        min_required_votes = math.ceil(num_windows / 2)
+        min_required_votes = (num_windows // 2) + 1
         if max_votes < min_required_votes:
             self.confidence_ = "low"
             self.vote_ratio_ = max_votes / num_windows
@@ -249,13 +255,17 @@ class SegmentedAligner(TransformerMixin):
 
         winning_results = offset_bins[winning_bin]
         self.best_offset_ = int(np.mean([offset for offset, _ in winning_results]))
-        self.best_score_ = np.mean([score for _, score in winning_results])
+        mean_score = float(np.mean([score for _, score in winning_results]))
+        self.best_score_ = mean_score * self.vote_ratio_
 
         logger.info(
-            "Consensus: offset=%d samples (%.2fs), score=%.0f from %d/%d windows [confidence=%s]",
+            "Consensus: offset=%d samples (%.2fs), score=%.0f "
+            "(mean=%.0f, vote_ratio=%.2f) from %d/%d windows [confidence=%s]",
             self.best_offset_,
             self.best_offset_ / self.sample_rate,
             self.best_score_,
+            mean_score,
+            self.vote_ratio_,
             len(winning_results),
             num_windows,
             self.confidence_,
@@ -335,6 +345,17 @@ class MaxScoreAligner(TransformerMixin):
                         ratio,
                         nearest,
                         rel_err * 100,
+                    )
+                    subpipe = subpipe_maker(nearest)
+                    substring = subpipe.fit_transform(self.srtin)
+                    score = self.base_aligner.fit_transform(
+                        refstring, substring, get_score=True
+                    )
+                    logger.info(
+                        "got score %.0f (offset %d) for snapped ratio %.4f",
+                        score[0],
+                        score[1],
+                        nearest,
                     )
                 self._scores.append((score, subpipe))
 

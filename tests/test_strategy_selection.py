@@ -177,3 +177,199 @@ class TestGetAlignmentStrategies:
         names = [s[0] for s in strategies]
         # When primary already matches adaptive config, no duplicate is added
         assert len(names) == len(set(names))
+
+
+# ── Drift check tests ────────────────────────────────────────────────────────
+
+
+class TestPrimaryHasNoDrift:
+    """_primary_has_no_drift skips adaptive for clean global-shift subtitles."""
+
+    def _make_binary(self, length: int, speech_rate: float = 0.3) -> np.ndarray:
+        rng = np.random.default_rng(42)
+        return (rng.random(length) < speech_rate).astype(float)
+
+    def _shift(self, arr: np.ndarray, offset: int) -> np.ndarray:
+        """Shift arr so FFTAligner returns +offset (subtitle offset samples ahead)."""
+        return np.roll(arr, -offset)
+
+    def test_clean_global_shift_returns_true(self):
+        """Clean global shift: both halves agree → drift check returns True."""
+        from ffsubsync.ffsubsync import _primary_has_no_drift
+        from ffsubsync.sklearn_shim import Pipeline, TransformerMixin
+
+        ref = self._make_binary(3000)
+        offset = 30  # 0.3 s at 100 Hz
+        sub = self._shift(ref, offset)
+
+        class _FakeSubPipe(TransformerMixin):
+            def __init__(self, data):
+                self._data = data
+
+            def fit(self, X):
+                return self
+
+            def transform(self, X):
+                return self._data
+
+        pipe = Pipeline([("sub", _FakeSubPipe(sub))])
+
+        result = _primary_has_no_drift(ref, pipe, None, offset)
+        assert result is True
+
+    def test_drifting_subtitle_returns_false(self):
+        """Subtitle that drifts mid-file: second half has different offset → False."""
+        from ffsubsync.ffsubsync import _primary_has_no_drift
+        from ffsubsync.sklearn_shim import Pipeline, TransformerMixin
+
+        ref = self._make_binary(3000)
+        first_half = np.roll(ref[:1500], -30)   # first half: offset +30
+        second_half = np.roll(ref[1500:], -200)  # second half: offset +200 (very different)
+        sub = np.concatenate([first_half, second_half])
+
+        class _FakeSubPipe(TransformerMixin):
+            def __init__(self, data):
+                self._data = data
+
+            def fit(self, X):
+                return self
+
+            def transform(self, X):
+                return self._data
+
+        pipe = Pipeline([("sub", _FakeSubPipe(sub))])
+
+        result = _primary_has_no_drift(ref, pipe, None, 30)
+        assert result is False
+
+    def test_short_reference_returns_false(self):
+        """Too-short reference (< 500 samples) cannot be split → False."""
+        from ffsubsync.ffsubsync import _primary_has_no_drift
+        from ffsubsync.sklearn_shim import Pipeline, TransformerMixin
+
+        ref = self._make_binary(400)
+        sub = self._shift(ref, 10)
+
+        class _FakeSubPipe(TransformerMixin):
+            def __init__(self, data):
+                self._data = data
+
+            def fit(self, X):
+                return self
+
+            def transform(self, X):
+                return self._data
+
+        pipe = Pipeline([("sub", _FakeSubPipe(sub))])
+        result = _primary_has_no_drift(ref, pipe, None, 10)
+        assert result is False
+
+    def test_transform_exception_returns_false(self):
+        """If subpipe.transform raises, conservatively return False."""
+        from ffsubsync.ffsubsync import _primary_has_no_drift
+        from ffsubsync.sklearn_shim import Pipeline, TransformerMixin
+
+        ref = self._make_binary(3000)
+
+        class _BrokenPipe(TransformerMixin):
+            def fit(self, X):
+                return self
+
+            def transform(self, X):
+                raise RuntimeError("bad pipe")
+
+        pipe = Pipeline([("sub", _BrokenPipe())])
+        result = _primary_has_no_drift(ref, pipe, None, 0)
+        assert result is False
+
+
+# ── Adaptive single-ratio tests ───────────────────────────────────────────────
+
+
+class TestAdaptiveSingleRatio:
+    """compute_alignment uses one ratio in drift-detection mode."""
+
+    def test_primary_scale_factor_none_uses_all_ratios(self, monkeypatch):
+        """Without primary_scale_factor, all framerate ratios are tried."""
+        from ffsubsync import ffsubsync as ffs_mod
+        from ffsubsync.ffsubsync import compute_alignment
+
+        call_log: list[float | None] = []
+        original_get = ffs_mod.get_framerate_ratios_to_try
+
+        def patched_get(args):
+            result = original_get(args)
+            call_log.extend(result)
+            return result
+
+        monkeypatch.setattr(ffs_mod, "get_framerate_ratios_to_try", patched_get)
+
+        args = _make_ffsubsync_args(
+            use_segmented_aligner=False, gss=False, skip_infer_framerate_ratio=True
+        )
+        ref = np.ones(200, dtype=float)
+        sub = np.ones(200, dtype=float)
+
+        class _FakePipe:
+            named_steps = {"scale": type("S", (), {"scale_factor": 1.0, "subs_": None})()}
+
+            def fit(self, X):
+                return self
+
+            def transform(self, X):
+                return sub
+
+            def fit_transform(self, X):
+                return sub
+
+        srt_pipe_maker = lambda ratio: _FakePipe()
+
+        try:
+            compute_alignment(args, None, None, srt_pipe_maker, ref, False, False, None)
+        except Exception:
+            pass
+
+        assert len(call_log) > 0, "get_framerate_ratios_to_try should be called"
+
+    def test_primary_scale_factor_set_skips_ratio_search(self, monkeypatch):
+        """With primary_scale_factor provided, ratio search is skipped entirely."""
+        from ffsubsync import ffsubsync as ffs_mod
+
+        call_log: list = []
+
+        def patched_get(args):
+            call_log.append(True)
+            return []
+
+        monkeypatch.setattr(ffs_mod, "get_framerate_ratios_to_try", patched_get)
+
+        args = _make_ffsubsync_args(
+            use_segmented_aligner=True, gss=False, skip_infer_framerate_ratio=True,
+            segment_window=5, segment_overlap=2,
+        )
+        ref = np.zeros(500, dtype=float)
+        sub = np.zeros(500, dtype=float)
+
+        class _FakePipe:
+            named_steps = {"scale": type("S", (), {"scale_factor": 1.0, "subs_": None})()}
+
+            def fit(self, X):
+                return self
+
+            def transform(self, X):
+                return sub
+
+            def fit_transform(self, X):
+                return sub
+
+        srt_pipe_maker = lambda ratio: _FakePipe()
+
+        from ffsubsync.ffsubsync import compute_alignment
+        try:
+            compute_alignment(
+                args, None, None, srt_pipe_maker, ref, False, True, 1.0
+            )
+        except Exception:
+            pass
+
+        assert len(call_log) == 0, "get_framerate_ratios_to_try must NOT be called when primary_scale_factor is set"

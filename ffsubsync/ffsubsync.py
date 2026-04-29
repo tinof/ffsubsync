@@ -151,6 +151,58 @@ def get_alignment_strategies(
     return strategies
 
 
+def _primary_has_no_drift(
+    reference_speech: np.ndarray,
+    primary_subpipe: Pipeline,
+    srtin: str | None,
+    primary_offset: int,
+    tolerance_seconds: float = 0.5,
+) -> bool:
+    """Two-halves consistency check for mid-file drift.
+
+    Splits reference and subtitle into halves, aligns each independently, and
+    returns True when both halves agree on the offset within tolerance. A True
+    result means the subtitle is a clean global shift with no temporal drift,
+    so adaptive (segmented) alignment can be skipped.
+    """
+    tolerance_samples = int(tolerance_seconds * SAMPLE_RATE)
+    try:
+        subtitle_speech = primary_subpipe.transform(srtin)
+        if isinstance(subtitle_speech, str):
+            subtitle_speech = np.array(list(map(int, subtitle_speech)), dtype=float)
+        else:
+            subtitle_speech = np.asarray(subtitle_speech, dtype=float)
+    except Exception:
+        return False
+
+    mid = len(reference_speech) // 2
+    if mid < 500:
+        return False
+
+    ref_a, ref_b = reference_speech[:mid], reference_speech[mid:]
+    sub_a = subtitle_speech[:mid]
+    sub_b = (
+        subtitle_speech[mid:]
+        if len(subtitle_speech) > mid
+        else np.array([], dtype=float)
+    )
+
+    if len(sub_a) < 200 or len(sub_b) < 200:
+        return False
+
+    try:
+        off_a = FFTAligner().fit(ref_a, sub_a).transform()
+        off_b = FFTAligner().fit(ref_b, sub_b).transform()
+    except Exception:
+        return False
+
+    return bool(
+        abs(off_a - off_b) <= tolerance_samples
+        and abs(off_a - primary_offset) <= tolerance_samples
+        and abs(off_b - primary_offset) <= tolerance_samples
+    )
+
+
 def compute_alignment(
     args: argparse.Namespace,
     srtin: str | None,
@@ -159,41 +211,50 @@ def compute_alignment(
     reference_speech: np.ndarray,
     use_gss: bool,
     use_segmented_aligner: bool,
+    primary_scale_factor: float | None = None,
 ) -> tuple[float, int, Pipeline]:
     skip_infer_framerate_ratio = (
         args.skip_infer_framerate_ratio or reference_pipe is None
     )
 
-    framerate_ratios = get_framerate_ratios_to_try(
-        argparse.Namespace(**override(args, gss=use_gss))
-    )
-    srt_pipes = [srt_pipe_maker(1.0)] + [
-        srt_pipe_maker(rat) for rat in framerate_ratios
-    ]
-
-    for srt_pipe in srt_pipes:
-        if callable(srt_pipe):
-            continue
-        srt_pipe.fit(srtin)
-
-    if (
-        not skip_infer_framerate_ratio
-        and reference_pipe is not None
-        and hasattr(reference_pipe[-1], "num_frames")
-    ):
-        inferred_framerate_ratio_from_length = (
-            float(reference_pipe[-1].num_frames)
-            / cast(Pipeline, srt_pipes[0])[-1].num_frames
+    if use_segmented_aligner and primary_scale_factor is not None:
+        # Drift-detection mode: framerate was already settled by primary.
+        # Only try the primary's ratio — segmented's job is catching temporal
+        # drift (windows disagreeing), not re-searching framerate space.
+        srt_pipes: list[Pipeline | Callable[[float], Pipeline]] = [
+            cast(Pipeline, srt_pipe_maker(primary_scale_factor)).fit(srtin)
+        ]
+    else:
+        framerate_ratios = get_framerate_ratios_to_try(
+            argparse.Namespace(**override(args, gss=use_gss))
         )
-        logger.info(
-            "inferred frameratio ratio: %.3f", inferred_framerate_ratio_from_length
-        )
-        srt_pipes.append(
-            cast(Pipeline, srt_pipe_maker(inferred_framerate_ratio_from_length)).fit(
-                srtin
+        srt_pipes = [srt_pipe_maker(1.0)] + [
+            srt_pipe_maker(rat) for rat in framerate_ratios
+        ]
+
+        for srt_pipe in srt_pipes:
+            if callable(srt_pipe):
+                continue
+            srt_pipe.fit(srtin)
+
+        if (
+            not skip_infer_framerate_ratio
+            and reference_pipe is not None
+            and hasattr(reference_pipe[-1], "num_frames")
+        ):
+            inferred_framerate_ratio_from_length = (
+                float(reference_pipe[-1].num_frames)
+                / cast(Pipeline, srt_pipes[0])[-1].num_frames
             )
-        )
-        logger.info("...done")
+            logger.info(
+                "inferred frameratio ratio: %.3f", inferred_framerate_ratio_from_length
+            )
+            srt_pipes.append(
+                cast(
+                    Pipeline, srt_pipe_maker(inferred_framerate_ratio_from_length)
+                ).fit(srtin)
+            )
+            logger.info("...done")
 
     aligner_class: type[FFTAligner] | type[SegmentedAligner]
     aligner_kwargs: dict[str, Any]
@@ -281,6 +342,7 @@ def try_sync(
                 strategy_results: list[
                     tuple[str, bool, bool, float, int, Pipeline]
                 ] = []
+                primary_scale_factor_for_adaptive: float | None = None
 
                 for strategy_name, use_gss, use_segmented_aligner in strategies:
                     logger.info(
@@ -298,6 +360,7 @@ def try_sync(
                             reference_speech,
                             use_gss,
                             use_segmented_aligner,
+                            primary_scale_factor_for_adaptive,
                         )
                     except Exception as e:
                         logger.warning(
@@ -323,18 +386,27 @@ def try_sync(
                         )
                     )
 
-                    # A4: If primary found near-zero offset, the subtitle is
-                    # already aligned — skip remaining (more expensive) strategies.
-                    if (
-                        strategy_name == "primary"
-                        and abs(offset / float(SAMPLE_RATE)) < 0.2
-                    ):
-                        logger.info(
-                            "Primary strategy found near-zero offset (%.3fs); "
-                            "skipping remaining strategies",
-                            abs(offset / float(SAMPLE_RATE)),
-                        )
-                        break
+                    # A4: After primary, run a cheap two-halves drift check.
+                    # Skip adaptive if both halves agree on the same offset —
+                    # that means the subtitle is a clean global shift with no
+                    # mid-file drift, and segmented alignment would be wasted CPU.
+                    if strategy_name == "primary":
+                        primary_scale_factor_for_adaptive = subpipe.named_steps[
+                            "scale"
+                        ].scale_factor
+                        if (
+                            len(strategies) > 1
+                            and srtin is not None
+                            and _primary_has_no_drift(
+                                reference_speech, subpipe, srtin, offset
+                            )
+                        ):
+                            logger.info(
+                                "Drift check passed: both halves agree on offset "
+                                "(%.3fs); skipping adaptive",
+                                abs(offset / float(SAMPLE_RATE)),
+                            )
+                            break
 
                 if len(strategy_results) == 0:
                     raise FailedToFindAlignmentException(

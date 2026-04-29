@@ -26,6 +26,8 @@ The original FFT alignment works well for straightforward sync cases, but fails 
 
 **Strategy selector margin** (`ffsubsync.py`): When both a primary and an adaptive alignment strategy are tried, the adaptive result must exceed the primary score by at least 15% to override it. Without this guard, a small numerical edge from an incomparable score metric was enough to flip the selection.
 
+**Adaptive skip gate — drift check** (`ffsubsync.py`): After primary alignment completes, a cheap two-halves consistency check (`_primary_has_no_drift`) splits reference and subtitle speech in half and runs `FFTAligner` on each half independently. If both halves agree on the same offset within 0.5 s, the subtitle has no mid-file drift and the expensive adaptive (segmented) strategy is skipped entirely. Additionally, when adaptive *does* run, it now uses only the framerate ratio chosen by primary instead of re-scanning all known ratios and running a full GSS sweep — dropping adaptive cost from ~63 FFT operations to ~9.
+
 ### `ssync` — Language-Aware Convenience Wrapper
 
 `ssync` is a single-argument wrapper that finds the subtitle file next to a video automatically and syncs it in-place. You don't need to pass `-i` / `-o` paths.

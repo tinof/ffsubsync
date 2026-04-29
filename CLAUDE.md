@@ -121,7 +121,10 @@ The default VAD is `subs_then_webrtc` (`DEFAULT_VAD` in `constants.py`): first a
 - Transformers follow fit/transform pattern for processing data through stages
 
 **Core Modules**:
-- `ffsubsync.py`: Main entry point, CLI argument parsing, orchestration. Includes `get_alignment_strategies()` which runs primary + optional adaptive strategy with a 15% score margin guard (adaptive must exceed primary by ≥15% to override it).
+- `ffsubsync.py`: Main entry point, CLI argument parsing, orchestration. Key functions:
+  - `get_alignment_strategies()`: returns primary + optional adaptive strategy list.
+  - `_primary_has_no_drift()`: cheap two-halves drift check run after primary completes. Splits reference and subtitle speech into halves, runs `FFTAligner` on each, and returns `True` when both halves agree on the offset within 0.5 s. Adaptive strategy is skipped when this returns `True` — avoids wasted CPU on easy global-shift subtitles.
+  - Strategy guards: adaptive must exceed primary score by ≥15% (A3); adaptive runs `SegmentedAligner` only at the primary's chosen framerate ratio (not all ratios + GSS), dropping adaptive cost from ~63 FFTs to ~9.
 - `aligners.py`: FFT-based and max-score alignment algorithms
   - `FFTAligner`: Fast convolution-based alignment using numpy FFT
   - `SegmentedAligner`: Sliding-window alignment with majority-vote consensus. Requires >50% of windows to agree on an offset bin; raises `FailedToFindAlignmentException` if the confidence gate fails. Exposes `confidence_` (`"high"/"medium"/"low"`) and `vote_ratio_` attributes.

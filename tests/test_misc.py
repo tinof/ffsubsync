@@ -30,7 +30,8 @@ def test_auto_sync_adds_adaptive_strategy():
     args = parser.parse_args([])
     assert get_alignment_strategies(args) == [
         ("primary", False, False),
-        ("adaptive", True, True),
+        ("adaptive-scale", True, False),
+        ("adaptive-segmented", True, True),
     ]
 
 
@@ -39,5 +40,5 @@ def test_auto_sync_respects_no_fix_framerate_for_adaptive_strategy():
     args = parser.parse_args(["--no-fix-framerate"])
     assert get_alignment_strategies(args) == [
         ("primary", False, False),
-        ("adaptive", False, True),
+        ("adaptive-segmented", False, True),
     ]

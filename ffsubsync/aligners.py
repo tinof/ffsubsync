@@ -308,9 +308,7 @@ class MaxScoreAligner(TransformerMixin):
     def fit_gss(self, refstring, subpipe_maker):
         # Track (score, subpipe, ratio) for post-GSS plausibility check.
         gss_candidates: list[tuple[tuple[float, int], Pipeline, float]] = []
-        best_baseline_score = max(
-            (score[0] for score, _ in self._scores), default=None
-        )
+        best_baseline_score = max((score[0] for score, _ in self._scores), default=None)
 
         def opt_func(framerate_ratio, is_last_iter):
             subpipe = subpipe_maker(framerate_ratio)
@@ -337,8 +335,7 @@ class MaxScoreAligner(TransformerMixin):
             if rel_err > FRAMERATE_SNAP_TOLERANCE:
                 if (
                     best_baseline_score is not None
-                    and score[0]
-                    >= best_baseline_score * OFF_GRID_GSS_MIN_IMPROVEMENT
+                    and score[0] >= best_baseline_score * OFF_GRID_GSS_MIN_IMPROVEMENT
                 ):
                     logger.warning(
                         "GSS ratio %.4f not near any known framerate pair "

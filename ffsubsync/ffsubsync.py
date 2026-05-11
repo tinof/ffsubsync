@@ -246,9 +246,9 @@ def compute_alignment(
             "inferred frameratio ratio: %.3f", inferred_framerate_ratio_from_length
         )
         srt_pipes.append(
-            cast(
-                Pipeline, srt_pipe_maker(inferred_framerate_ratio_from_length)
-            ).fit(srtin)
+            cast(Pipeline, srt_pipe_maker(inferred_framerate_ratio_from_length)).fit(
+                srtin
+            )
         )
         logger.info("...done")
 

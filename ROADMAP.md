@@ -203,7 +203,7 @@ The `ssync` script (`/home/ubuntu/bin/ssync`) wraps ffsubsync for batch processi
 
 **Issue encountered**: Finnish characters (ä, ö) corrupted during processing.
 
-**Solution**: 
+**Solution**:
 1. Detect encoding with `chardet`
 2. Write output with UTF-8 BOM (`utf-8-sig`) for TV compatibility
 
@@ -226,12 +226,12 @@ This fork was developed across multiple sessions. Key decisions:
 
 1. **Why ONNX for ARM64?**: Native TEN VAD requires specific binaries. ONNX Runtime is cross-platform.
 
-2. **Why piecewise sync as separate tool?**: 
+2. **Why piecewise sync as separate tool?**:
    - Minimize changes to core ffsubsync code
    - Can be tested independently
    - Future integration planned (see Priority 1)
 
-3. **Why 60-second windows?**: 
+3. **Why 60-second windows?**:
    - Balance between granularity and stability
    - Matches typical scene length
    - Configurable via `--window` flag

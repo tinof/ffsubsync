@@ -219,7 +219,10 @@ class TestGetAlignmentStrategies:
 
         args = _make_ffsubsync_args(auto_sync=True, no_fix_framerate=True)
         strategies = get_alignment_strategies(args)
-        assert strategies == [("primary", False, False), ("adaptive-segmented", False, True)]
+        assert strategies == [
+            ("primary", False, False),
+            ("adaptive-segmented", False, True),
+        ]
 
     def test_no_duplicate_strategies(self):
         from ffsubsync.ffsubsync import get_alignment_strategies
@@ -277,8 +280,10 @@ class TestPrimaryHasNoDrift:
         from ffsubsync.sklearn_shim import Pipeline, TransformerMixin
 
         ref = self._make_binary(3000)
-        first_half = np.roll(ref[:1500], -30)   # first half: offset +30
-        second_half = np.roll(ref[1500:], -200)  # second half: offset +200 (very different)
+        first_half = np.roll(ref[:1500], -30)  # first half: offset +30
+        second_half = np.roll(
+            ref[1500:], -200
+        )  # second half: offset +200 (very different)
         sub = np.concatenate([first_half, second_half])
 
         class _FakeSubPipe(TransformerMixin):

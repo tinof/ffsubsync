@@ -202,7 +202,7 @@ def main() -> int:
             _print(
                 "Embedded subtitle reference: "
                 f"stream #{embedded_stream.get('index')} "
-                f"({ _stream_language(embedded_stream) or 'unknown' })"
+                f"({_stream_language(embedded_stream) or 'unknown'})"
             )
         else:
             _print("Embedded subtitle reference: none; would use audio")

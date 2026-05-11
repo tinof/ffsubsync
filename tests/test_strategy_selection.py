@@ -1,6 +1,7 @@
 """Tests for adaptive strategy selection and GSS ratio snapping."""
 
 import argparse
+import contextlib
 
 import numpy as np
 
@@ -90,6 +91,63 @@ class TestGSSRatioSnap:
         assert score == 1000.0
         assert offset == 1000
 
+    def test_off_grid_gss_ratio_accepted_when_it_clearly_beats_baseline(
+        self, monkeypatch
+    ):
+        """A non-standard scale can rescue real drift when it is clearly stronger."""
+        import ffsubsync.aligners as aligners
+
+        def fake_gss(func, *_):
+            func(1.012, True)
+
+        class FakeAligner:
+            def fit_transform(self, _refstring, substring, get_score=False):
+                return float(substring[0]), int(substring[0])
+
+        class FakePipe:
+            def __init__(self, ratio):
+                self.ratio = ratio
+
+            def fit_transform(self, _srtin):
+                return np.array([round(self.ratio * 1000)])
+
+        monkeypatch.setattr(aligners, "gss", fake_gss)
+
+        max_score_aligner = aligners.MaxScoreAligner(FakeAligner(), srtin="subs.srt")
+        max_score_aligner._scores.append(((800.0, 0), FakePipe(1.0)))
+        max_score_aligner.fit_gss(np.ones(10), FakePipe)
+
+        ((score, offset), subpipe) = max_score_aligner._scores[-1]
+        assert subpipe.ratio == 1.012
+        assert score == 1012.0
+        assert offset == 1012
+
+    def test_off_grid_gss_ratio_discarded_without_clear_gain(self, monkeypatch):
+        """Keep the drift guard when the off-grid score is only marginally better."""
+        import ffsubsync.aligners as aligners
+
+        def fake_gss(func, *_):
+            func(1.012, True)
+
+        class FakeAligner:
+            def fit_transform(self, _refstring, substring, get_score=False):
+                return float(substring[0]), int(substring[0])
+
+        class FakePipe:
+            def __init__(self, ratio):
+                self.ratio = ratio
+
+            def fit_transform(self, _srtin):
+                return np.array([round(self.ratio * 1000)])
+
+        monkeypatch.setattr(aligners, "gss", fake_gss)
+
+        max_score_aligner = aligners.MaxScoreAligner(FakeAligner(), srtin="subs.srt")
+        max_score_aligner._scores.append(((1000.0, 0), FakePipe(1.0)))
+        max_score_aligner.fit_gss(np.ones(10), FakePipe)
+
+        assert len(max_score_aligner._scores) == 1
+
 
 # ── Strategy selection margin tests ─────────────────────────────────────────
 
@@ -154,18 +212,14 @@ class TestGetAlignmentStrategies:
         args = _make_ffsubsync_args(auto_sync=True)
         strategies = get_alignment_strategies(args)
         names = [s[0] for s in strategies]
-        assert "primary" in names
-        assert "adaptive" in names
+        assert names == ["primary", "adaptive-scale", "adaptive-segmented"]
 
     def test_no_fix_framerate_adaptive_gss_disabled(self):
         from ffsubsync.ffsubsync import get_alignment_strategies
 
         args = _make_ffsubsync_args(auto_sync=True, no_fix_framerate=True)
         strategies = get_alignment_strategies(args)
-        adaptive = next((s for s in strategies if s[0] == "adaptive"), None)
-        if adaptive:
-            # adaptive with no_fix_framerate → gss=False
-            assert adaptive[1] is False
+        assert strategies == [("primary", False, False), ("adaptive-segmented", False, True)]
 
     def test_no_duplicate_strategies(self):
         from ffsubsync.ffsubsync import get_alignment_strategies
@@ -283,14 +337,14 @@ class TestPrimaryHasNoDrift:
         assert result is False
 
 
-# ── Adaptive single-ratio tests ───────────────────────────────────────────────
+# ── Adaptive ratio-search tests ───────────────────────────────────────────────
 
 
-class TestAdaptiveSingleRatio:
-    """compute_alignment uses one ratio in drift-detection mode."""
+class TestAdaptiveRatioSearch:
+    """compute_alignment keeps ratio search available for adaptive drift cases."""
 
-    def test_primary_scale_factor_none_uses_all_ratios(self, monkeypatch):
-        """Without primary_scale_factor, all framerate ratios are tried."""
+    def test_non_segmented_alignment_uses_all_ratios(self, monkeypatch):
+        """Non-segmented adaptive scale search tries framerate ratios."""
         from ffsubsync import ffsubsync as ffs_mod
         from ffsubsync.ffsubsync import compute_alignment
 
@@ -311,8 +365,6 @@ class TestAdaptiveSingleRatio:
         sub = np.ones(200, dtype=float)
 
         class _FakePipe:
-            named_steps = {"scale": type("S", (), {"scale_factor": 1.0, "subs_": None})()}
-
             def fit(self, X):
                 return self
 
@@ -322,17 +374,16 @@ class TestAdaptiveSingleRatio:
             def fit_transform(self, X):
                 return sub
 
-        srt_pipe_maker = lambda ratio: _FakePipe()
+        def srt_pipe_maker(ratio):
+            return _FakePipe()
 
-        try:
-            compute_alignment(args, None, None, srt_pipe_maker, ref, False, False, None)
-        except Exception:
-            pass
+        with contextlib.suppress(Exception):
+            compute_alignment(args, None, None, srt_pipe_maker, ref, False, False)
 
         assert len(call_log) > 0, "get_framerate_ratios_to_try should be called"
 
-    def test_primary_scale_factor_set_skips_ratio_search(self, monkeypatch):
-        """With primary_scale_factor provided, ratio search is skipped entirely."""
+    def test_segmented_alignment_also_searches_ratios(self, monkeypatch):
+        """Segmented adaptive no longer reuses only the primary scale factor."""
         from ffsubsync import ffsubsync as ffs_mod
 
         call_log: list = []
@@ -344,15 +395,16 @@ class TestAdaptiveSingleRatio:
         monkeypatch.setattr(ffs_mod, "get_framerate_ratios_to_try", patched_get)
 
         args = _make_ffsubsync_args(
-            use_segmented_aligner=True, gss=False, skip_infer_framerate_ratio=True,
-            segment_window=5, segment_overlap=2,
+            use_segmented_aligner=True,
+            gss=False,
+            skip_infer_framerate_ratio=True,
+            segment_window=5,
+            segment_overlap=2,
         )
         ref = np.zeros(500, dtype=float)
         sub = np.zeros(500, dtype=float)
 
         class _FakePipe:
-            named_steps = {"scale": type("S", (), {"scale_factor": 1.0, "subs_": None})()}
-
             def fit(self, X):
                 return self
 
@@ -362,14 +414,12 @@ class TestAdaptiveSingleRatio:
             def fit_transform(self, X):
                 return sub
 
-        srt_pipe_maker = lambda ratio: _FakePipe()
+        def srt_pipe_maker(ratio):
+            return _FakePipe()
 
         from ffsubsync.ffsubsync import compute_alignment
-        try:
-            compute_alignment(
-                args, None, None, srt_pipe_maker, ref, False, True, 1.0
-            )
-        except Exception:
-            pass
 
-        assert len(call_log) == 0, "get_framerate_ratios_to_try must NOT be called when primary_scale_factor is set"
+        with contextlib.suppress(Exception):
+            compute_alignment(args, None, None, srt_pipe_maker, ref, False, True)
+
+        assert len(call_log) > 0, "segmented adaptive should still search ratios"

@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
-from ffsubsync.ssync import _candidate_subtitle_paths, _find_subtitle
+from ffsubsync.ssync import (
+    _candidate_subtitle_paths,
+    _find_subtitle,
+    _pick_reference_subtitle_stream,
+    _stream_language,
+)
 
 
 class TestCandidateSubtitlePaths:
@@ -40,6 +45,11 @@ class TestCandidateSubtitlePaths:
         for c in _candidate_subtitle_paths(video, "fin"):
             assert c.suffix == ".srt"
 
+    def test_fin_lang_includes_fi_alias(self):
+        video = Path("/media/show.mkv")
+        candidates = [p.name for p in _candidate_subtitle_paths(video, "fin")]
+        assert "show.fi.srt" in candidates
+
 
 class TestFindSubtitle:
     def test_returns_none_when_no_subtitle_exists(self, tmp_path):
@@ -52,6 +62,14 @@ class TestFindSubtitle:
         video = tmp_path / "show.mkv"
         video.touch()
         sub = tmp_path / "show.fin.srt"
+        sub.touch()
+        result = _find_subtitle(video, "fin")
+        assert result == sub
+
+    def test_finds_finnish_alias(self, tmp_path):
+        video = tmp_path / "show.mkv"
+        video.touch()
+        sub = tmp_path / "show.fi.srt"
         sub.touch()
         result = _find_subtitle(video, "fin")
         assert result == sub
@@ -69,3 +87,39 @@ class TestFindSubtitle:
         video = tmp_path / "missing.mkv"
         result = _find_subtitle(video, "fin")
         assert result is None
+
+
+class TestEmbeddedReferenceSubtitleSelection:
+    def test_prefers_english_non_target_stream(self):
+        streams = [
+            {"index": 2, "tags": {"language": "fin"}},
+            {"index": 3, "tags": {"language": "eng"}},
+            {"index": 4, "tags": {"language": "spa"}},
+        ]
+
+        result = _pick_reference_subtitle_stream(streams, "fin")
+
+        assert result is not None
+        assert result["index"] == 3
+
+    def test_uses_first_non_target_when_no_english_stream(self):
+        streams = [
+            {"index": 2, "tags": {"language": "fin"}},
+            {"index": 3, "tags": {"language": "swe"}},
+        ]
+
+        result = _pick_reference_subtitle_stream(streams, "fin")
+
+        assert result is not None
+        assert result["index"] == 3
+
+    def test_falls_back_to_target_stream_when_it_is_the_only_stream(self):
+        streams = [{"index": 2, "tags": {"language": "fin"}}]
+
+        result = _pick_reference_subtitle_stream(streams, "fin")
+
+        assert result is not None
+        assert result["index"] == 2
+
+    def test_stream_language_handles_missing_tags(self):
+        assert _stream_language({"index": 2}) == ""

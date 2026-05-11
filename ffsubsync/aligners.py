@@ -14,6 +14,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 MIN_FRAMERATE_RATIO = 0.9
 MAX_FRAMERATE_RATIO = 1.1
+OFF_GRID_GSS_MIN_IMPROVEMENT = 1.15
 
 # All known valid framerate ratios and their reciprocals, plus 1.0.
 _KNOWN_FRAMERATE_RATIOS: list[float] = (
@@ -307,6 +308,9 @@ class MaxScoreAligner(TransformerMixin):
     def fit_gss(self, refstring, subpipe_maker):
         # Track (score, subpipe, ratio) for post-GSS plausibility check.
         gss_candidates: list[tuple[tuple[float, int], Pipeline, float]] = []
+        best_baseline_score = max(
+            (score[0] for score, _ in self._scores), default=None
+        )
 
         def opt_func(framerate_ratio, is_last_iter):
             subpipe = subpipe_maker(framerate_ratio)
@@ -331,13 +335,31 @@ class MaxScoreAligner(TransformerMixin):
             nearest = min(_KNOWN_FRAMERATE_RATIOS, key=lambda c: abs(ratio - c) / c)
             rel_err = abs(ratio - nearest) / nearest
             if rel_err > FRAMERATE_SNAP_TOLERANCE:
-                logger.warning(
-                    "GSS ratio %.4f not near any known framerate pair "
-                    "(closest=%.4f, err=%.2f%%); discarding to avoid drift",
-                    ratio,
-                    nearest,
-                    rel_err * 100,
-                )
+                if (
+                    best_baseline_score is not None
+                    and score[0]
+                    >= best_baseline_score * OFF_GRID_GSS_MIN_IMPROVEMENT
+                ):
+                    logger.warning(
+                        "GSS ratio %.4f not near any known framerate pair "
+                        "(closest=%.4f, err=%.2f%%), but accepting because "
+                        "score %.0f beats best fixed-ratio score %.0f by >= %.0f%%",
+                        ratio,
+                        nearest,
+                        rel_err * 100,
+                        score[0],
+                        best_baseline_score,
+                        (OFF_GRID_GSS_MIN_IMPROVEMENT - 1.0) * 100,
+                    )
+                    self._scores.append((score, subpipe))
+                else:
+                    logger.warning(
+                        "GSS ratio %.4f not near any known framerate pair "
+                        "(closest=%.4f, err=%.2f%%); discarding to avoid drift",
+                        ratio,
+                        nearest,
+                        rel_err * 100,
+                    )
             else:
                 if abs(ratio - nearest) > 1e-6:
                     logger.info(

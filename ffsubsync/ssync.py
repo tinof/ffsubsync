@@ -25,7 +25,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "sync it with ffsubsync."
         )
     )
-    parser.add_argument("video", help="Path to the reference video file")
+    parser.add_argument(
+        "video",
+        nargs="?",
+        default=".",
+        help="Path to the reference video file or directory (default: current directory)",
+    )
     parser.add_argument(
         "--lang",
         default=DEFAULT_SUB_LANG,
@@ -175,79 +180,112 @@ def main() -> int:
     with contextlib.suppress(Exception):
         locale.setlocale(locale.LC_ALL, "")
 
-    video = Path(args.video)
-    _print(f"Processing subtitles for {video.name} (Language: {lang})")
-
-    if not video.exists() or not video.is_file():
-        _print(f"Video file not found: {video}")
+    video_path = Path(args.video)
+    if not video_path.exists():
+        _print(f"Video file or directory not found: {video_path}")
         return 1
 
-    subtitle = _find_subtitle(video, lang)
-    if subtitle is None:
-        _print(f"Subtitle file for {video.stem} not found. Skipping gracefully.")
-        return 0
+    if video_path.is_dir():
+        video_extensions = {
+            ".mp4",
+            ".mkv",
+            ".avi",
+            ".m4v",
+            ".ts",
+            ".mov",
+            ".webm",
+            ".flv",
+            ".wmv",
+            ".mpg",
+            ".mpeg",
+            ".ogv",
+            ".3gp",
+        }
+        video_files = []
+        for p in video_path.rglob("*"):
+            if p.is_file() and p.suffix.lower() in video_extensions:
+                video_files.append(p)
+        video_files = sorted(video_files)
+        if not video_files:
+            _print(f"No video files found in directory: {video_path}")
+            return 0
+    else:
+        video_files = [video_path]
 
-    output = _resolve_output_path(subtitle)
-    ffsubsync_extra: list[str] = []
-    if args.preflight:
-        ffsubsync_extra.append("--preflight")
+    exit_code = 0
+    for video in video_files:
+        _print(f"Processing subtitles for {video.name} (Language: {lang})")
 
-    embedded_stream = _pick_reference_subtitle_stream(
-        _embedded_subtitle_streams(video), lang
-    )
+        subtitle = _find_subtitle(video, lang)
+        if subtitle is None:
+            _print(f"Subtitle file for {video.stem} not found. Skipping gracefully.")
+            continue
 
-    if args.dry_run:
-        _print(f"Reference video: {video}")
-        if embedded_stream is not None:
-            _print(
-                "Embedded subtitle reference: "
-                f"stream #{embedded_stream.get('index')} "
-                f"({_stream_language(embedded_stream) or 'unknown'})"
-            )
-        else:
-            _print("Embedded subtitle reference: none; would use audio")
-        _print(f"Input subtitle: {subtitle}")
-        _print(f"Output subtitle: {output}")
-        return 0
+        output = _resolve_output_path(subtitle)
+        ffsubsync_extra: list[str] = []
+        if args.preflight:
+            ffsubsync_extra.append("--preflight")
 
-    with tempfile.TemporaryDirectory(prefix="ffsubsync-ssync-") as temp_name:
-        reference: Path = video
-        if embedded_stream is not None:
-            extracted = _extract_embedded_reference_subtitle(
-                video, embedded_stream, Path(temp_name)
-            )
-            if extracted is not None:
-                reference = extracted
-                _print(
-                    "Synchronizing subtitles for "
-                    f"{video.name} using embedded subtitle stream "
-                    f"#{embedded_stream.get('index')} as reference"
-                )
-            else:
-                _print(
-                    "Embedded subtitle stream could not be extracted; "
-                    "using audio track as reference"
-                )
-        else:
-            _print(
-                f"Synchronizing subtitles for {video.name} using audio track as reference"
-            )
-
-        ffsubsync_args = make_parser().parse_args(
-            [
-                str(reference),
-                "-i",
-                str(subtitle),
-                "-o",
-                str(output),
-                "--output-encoding",
-                "same",
-                *ffsubsync_extra,
-            ]
+        embedded_stream = _pick_reference_subtitle_stream(
+            _embedded_subtitle_streams(video), lang
         )
 
-        result = run(ffsubsync_args)
-        return int(result.get("retval", 1))
+        if args.dry_run:
+            _print(f"Reference video: {video}")
+            if embedded_stream is not None:
+                _print(
+                    "Embedded subtitle reference: "
+                    f"stream #{embedded_stream.get('index')} "
+                    f"({_stream_language(embedded_stream) or 'unknown'})"
+                )
+            else:
+                _print("Embedded subtitle reference: none; would use audio")
+            _print(f"Input subtitle: {subtitle}")
+            _print(f"Output subtitle: {output}")
+            continue
+
+        with tempfile.TemporaryDirectory(prefix="ffsubsync-ssync-") as temp_name:
+            reference: Path = video
+            if embedded_stream is not None:
+                extracted = _extract_embedded_reference_subtitle(
+                    video, embedded_stream, Path(temp_name)
+                )
+                if extracted is not None:
+                    reference = extracted
+                    _print(
+                        "Synchronizing subtitles for "
+                        f"{video.name} using embedded subtitle stream "
+                        f"#{embedded_stream.get('index')} as reference"
+                    )
+                else:
+                    _print(
+                        "Embedded subtitle stream could not be extracted; "
+                        "using audio track as reference"
+                    )
+            else:
+                _print(
+                    f"Synchronizing subtitles for {video.name} using audio track as reference"
+                )
+
+            ffsubsync_args = make_parser().parse_args(
+                [
+                    str(reference),
+                    "-i",
+                    str(subtitle),
+                    "-o",
+                    str(output),
+                    "--output-encoding",
+                    "same",
+                    *ffsubsync_extra,
+                ]
+            )
+
+            result = run(ffsubsync_args)
+            retval = int(result.get("retval", 1))
+            if retval != 0:
+                exit_code = retval
+
+    return exit_code
 
 
 if __name__ == "__main__":

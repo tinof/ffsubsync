@@ -168,3 +168,29 @@ exclude = [
     "versioneer.py",
     "ffsubsync/_version.py",
 ]
+
+[tool.basedpyright]
+# basedpyright powers the Claude Code LSP tool and serves as the CLI type-check step.
+# "standard" mode keeps real type errors visible without basedpyright's strictest noise.
+typeCheckingMode = "standard"
+pythonVersion = "3.10"
+exclude = [
+    "**/__pycache__",
+    "build",
+    "dist",
+    "docs",
+    "versioneer.py",
+    "ffsubsync/_version.py",
+]
+# This codebase is partially typed and numpy-heavy; silence "unknown/any" churn so that
+# actionable diagnostics (e.g. None-comparison, operator misuse) stand out.
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownParameterType = false
+reportUnknownLambdaType = false
+reportMissingParameterType = false
+reportAny = false
+reportImplicitOverride = false
+reportImplicitStringConcatenation = false
+reportUnusedCallResult = false

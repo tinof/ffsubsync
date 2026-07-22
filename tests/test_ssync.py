@@ -3,11 +3,16 @@
 from pathlib import Path
 
 from ffsubsync.ssync import (
+    SsyncJob,
+    SsyncOptions,
     _candidate_subtitle_paths,
     _find_subtitle,
     _pick_reference_subtitle_stream,
     _stream_language,
+    build_sync_args,
+    choose_reference_source,
     main,
+    resolve_jobs,
 )
 
 
@@ -127,7 +132,7 @@ class TestEmbeddedReferenceSubtitleSelection:
 
 
 class TestSsyncMain:
-    def test_ssync_directory_recursive(self, tmp_path, monkeypatch, capsys):
+    def test_resolves_directory_jobs_and_skips_missing_subtitles(self, tmp_path):
         # Create a nested directory structure with video files and subtitle files
         dir1 = tmp_path / "Season 01"
         dir1.mkdir()
@@ -148,11 +153,38 @@ class TestSsyncMain:
         v3 = dir1 / "Lucifer - S01E03.mkv"
         v3.touch()
 
-        # Mock sys.argv to run on tmp_path in dry-run mode
-        monkeypatch.setattr("sys.argv", ["ssync", str(tmp_path), "--dry-run"])
+        jobs, skipped = resolve_jobs(
+            [v1, v2, v3],
+            SsyncOptions(input_path=tmp_path, lang="fin", reference_source="audio"),
+        )
 
-        # Run main
-        exit_code = main()
+        assert [job.video for job in jobs] == [v1, v2]
+        assert [job.subtitle for job in jobs] == [s1, s2]
+        assert skipped[0].video == v3
+        assert "Skipping gracefully" in (skipped[0].skipped_reason or "")
+
+    def test_ssync_directory_recursive(self, tmp_path, capsys):
+        # Create a nested directory structure with video files and subtitle files
+        dir1 = tmp_path / "Season 01"
+        dir1.mkdir()
+
+        # S01E01 - video + subtitle
+        v1 = dir1 / "Lucifer - S01E01.mkv"
+        v1.touch()
+        s1 = dir1 / "Lucifer - S01E01.fin.srt"
+        s1.touch()
+
+        # S01E02 - video + subtitle
+        v2 = dir1 / "Lucifer - S01E02.mkv"
+        v2.touch()
+        s2 = dir1 / "Lucifer - S01E02.fin.srt"
+        s2.touch()
+
+        # S01E03 - video with no subtitle (should be skipped gracefully)
+        v3 = dir1 / "Lucifer - S01E03.mkv"
+        v3.touch()
+
+        exit_code = main([str(tmp_path), "--dry-run"])
 
         assert exit_code == 0
 
@@ -182,11 +214,7 @@ class TestSsyncMain:
         # Change cwd to tmp_path
         monkeypatch.chdir(tmp_path)
 
-        # Mock sys.argv to run with no arguments (which defaults to ".") in dry-run mode
-        monkeypatch.setattr("sys.argv", ["ssync", "--dry-run"])
-
-        # Import main from ssync
-        exit_code = main()
+        exit_code = main(["--dry-run"])
 
         assert exit_code == 0
         captured = capsys.readouterr()
@@ -194,21 +222,142 @@ class TestSsyncMain:
         assert "Reference video: Show - S01E01.mkv" in captured.err
         assert "Input subtitle: Show - S01E01.fin.srt" in captured.err
 
-    def test_ssync_directory_empty(self, tmp_path, monkeypatch, capsys):
-        monkeypatch.setattr("sys.argv", ["ssync", str(tmp_path), "--dry-run"])
-
-        exit_code = main()
+    def test_ssync_directory_empty(self, tmp_path, capsys):
+        exit_code = main([str(tmp_path), "--dry-run"])
 
         assert exit_code == 0
         captured = capsys.readouterr()
         assert f"No video files found in directory: {tmp_path}" in captured.err
 
-    def test_ssync_missing_path(self, tmp_path, monkeypatch, capsys):
+    def test_ssync_missing_path(self, tmp_path, capsys):
         missing_path = tmp_path / "nonexistent"
-        monkeypatch.setattr("sys.argv", ["ssync", str(missing_path), "--dry-run"])
 
-        exit_code = main()
+        exit_code = main([str(missing_path), "--dry-run"])
 
         assert exit_code == 1
         captured = capsys.readouterr()
         assert f"Video file or directory not found: {missing_path}" in captured.err
+
+    def test_audio_default_does_not_probe_embedded_streams(self, tmp_path, monkeypatch):
+        video = tmp_path / "Show - S01E01.mkv"
+        video.touch()
+        subtitle = tmp_path / "Show - S01E01.fin.srt"
+        subtitle.touch()
+        job = SsyncJob(
+            video=video,
+            subtitle=subtitle,
+            output=subtitle,
+            lang="fin",
+            reference_source="audio",
+        )
+
+        def fail_if_probed(_):
+            raise AssertionError("audio policy must not inspect embedded streams")
+
+        monkeypatch.setattr(
+            "ffsubsync.ssync._embedded_subtitle_streams", fail_if_probed
+        )
+
+        request = choose_reference_source(job, tmp_path)
+        args = build_sync_args(request)
+
+        assert request.reference == video
+        assert args.reference == str(video)
+        assert args.vad == "webrtc"
+
+    def test_explicit_embedded_reference_uses_preferred_stream(
+        self, tmp_path, monkeypatch
+    ):
+        video = tmp_path / "Show - S01E01.mkv"
+        video.touch()
+        subtitle = tmp_path / "Show - S01E01.fin.srt"
+        subtitle.touch()
+        job = SsyncJob(
+            video=video,
+            subtitle=subtitle,
+            output=subtitle,
+            lang="fin",
+            reference_source="embedded",
+        )
+        monkeypatch.setattr(
+            "ffsubsync.ssync._embedded_subtitle_streams",
+            lambda _: [
+                {"index": 2, "tags": {"language": "fin"}},
+                {"index": 3, "tags": {"language": "eng"}},
+            ],
+        )
+
+        def fake_extract(_, stream, temp_dir):
+            extracted = temp_dir / f"embedded-reference-{stream['index']}.srt"
+            extracted.write_text("1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+            return extracted
+
+        monkeypatch.setattr(
+            "ffsubsync.ssync._extract_embedded_reference_subtitle",
+            fake_extract,
+        )
+
+        request = choose_reference_source(job, tmp_path)
+        args = build_sync_args(request)
+
+        assert request.reference.name == "embedded-reference-3.srt"
+        assert args.reference.endswith("embedded-reference-3.srt")
+        assert args.vad is None
+
+    def test_failed_embedded_reference_falls_back_to_audio_with_message(
+        self, tmp_path, monkeypatch
+    ):
+        video = tmp_path / "Show - S01E01.mkv"
+        video.touch()
+        subtitle = tmp_path / "Show - S01E01.fin.srt"
+        subtitle.touch()
+        job = SsyncJob(
+            video=video,
+            subtitle=subtitle,
+            output=subtitle,
+            lang="fin",
+            reference_source="embedded",
+        )
+        monkeypatch.setattr(
+            "ffsubsync.ssync._embedded_subtitle_streams",
+            lambda _: [{"index": 2, "tags": {"language": "eng"}}],
+        )
+        monkeypatch.setattr(
+            "ffsubsync.ssync._extract_embedded_reference_subtitle",
+            lambda *_: None,
+        )
+
+        request = choose_reference_source(job, tmp_path)
+        args = build_sync_args(request)
+
+        assert request.reference == video
+        assert args.vad == "webrtc"
+        assert "could not be extracted" in request.message
+
+    def test_full_cli_entrypoint_with_fake_executor(self, tmp_path, capsys):
+        video = tmp_path / "Show - S01E01.mkv"
+        video.touch()
+        subtitle = tmp_path / "Show - S01E01.fin.srt"
+        subtitle.touch()
+        captured_args = []
+
+        def fake_executor(args):
+            captured_args.append(args)
+            return {
+                "retval": 0,
+                "offset_seconds": 1.25,
+                "framerate_scale_factor": 1.0,
+            }
+
+        exit_code = main([str(video), "--preflight"], executor=fake_executor)
+
+        assert exit_code == 0
+        assert len(captured_args) == 1
+        assert captured_args[0].reference == str(video)
+        assert captured_args[0].srtin == [str(subtitle)]
+        assert captured_args[0].srtout == str(subtitle)
+        assert captured_args[0].output_encoding == "same"
+        assert captured_args[0].preflight is True
+        assert captured_args[0].vad == "webrtc"
+        captured = capsys.readouterr()
+        assert "using audio track as reference" in captured.err

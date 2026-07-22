@@ -1,194 +1,277 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This is the canonical AI-agent guide for this repository. `CLAUDE.md` should
+link here instead of carrying a separate copy.
 
 ## Project Overview
 
-FFsubsync is a language-agnostic command-line tool for automatic synchronization of subtitles with video. It uses voice activity detection (VAD) and Fast Fourier Transform (FFT) based signal processing to align subtitles with audio/video streams.
+FFsubsync is a Python command-line tool for synchronizing subtitle timing with a
+reference video, audio track, subtitle file, or serialized speech array. It is
+language-agnostic: both audio/video and subtitles are converted into speech or
+non-speech timelines, then aligned with FFT-based signal processing.
 
-**Supported Platforms**: Linux and macOS only (no Windows support)
+Supported platforms are Linux and macOS. Windows is not supported. The external
+`ffmpeg` and `ffprobe` binaries must be installed and available on `PATH` unless
+the user passes an explicit ffmpeg path.
 
-**Entry Points**: The tool provides three CLI aliases (all equivalent):
-- `ffsubsync` - Main entry point
-- `ffs` - Short alias
-- `subsync` - Alternative alias
+Python support starts at 3.10 (`requires-python = ">=3.10"`). Packaging uses
+setuptools and Versioneer.
+
+## CLI Entry Points
+
+`pyproject.toml` installs four console scripts:
+
+- `ffsubsync`, `ffs`, and `subsync`: equivalent low-level CLIs implemented by
+  `ffsubsync:main`. These expect explicit reference/input/output arguments.
+- `ssync`: convenience workflow implemented by `ffsubsync.ssync:main`.
+
+`ssync` is a first-class workflow:
+
+- `ssync episode.mkv` syncs the matching language subtitle beside that video in
+  place.
+- Plain `ssync` scans the current directory recursively for videos and processes
+  them in sorted order.
+- The default subtitle language is Finnish (`fin`), with `fin`/`fi` aliases.
+- `--lang` changes the suffix used for subtitle discovery.
+- `--preflight` is passed through to the sync engine.
+- `--reference-source audio` is the default and does not probe embedded subtitle
+  streams.
+- `--reference-source embedded` opts into selecting and extracting an embedded
+  subtitle reference, preferring non-target English streams and falling back to
+  audio if extraction fails.
+- `--dry-run` reports resolved jobs and reference policy without running
+  extraction or synchronization.
+
+On this Ubuntu machine, prior local deployment used a `pipxu` managed install and
+`/home/ubuntu/bin/ssync` is a user-facing wrapper. If the user asks to install or
+refresh the command they actually run, verify `ssync` from outside the checkout
+so imports do not accidentally come from the repo.
 
 ## Development Commands
 
-### Environment Setup
-```bash
-# Install development dependencies (recommended)
-pip install -e ".[dev]"
+Install the project for local development:
 
-# Or separately
+```bash
+pip install -e ".[dev]"
+```
+
+Alternative legacy setup:
+
+```bash
 pip install -r requirements.txt
 pip install -r requirements-dev.txt
 pip install -e .
+```
 
-# Install pre-commit hooks (required for development)
+Install hooks:
+
+```bash
 pip install pre-commit
 pre-commit install
 ```
 
-### Code Quality (Ruff)
+Lint and format:
+
 ```bash
-# Run all pre-commit hooks on all files
-pre-commit run --all-files
-
-# Lint code (auto-fix where possible)
+ruff check .
 ruff check . --fix
-
-# Format code
 ruff format .
-
-# Check formatting without changes
 ruff format --check .
+pre-commit run --all-files
+pre-commit run --all-files --hook-stage push
 ```
 
-### Testing
+Tests:
+
 ```bash
-# Run unit tests only (fast, recommended during development)
 pytest -v -m 'not integration' tests/
-
-# Run all tests including integration tests (requires test data)
 pytest -v tests/
-
-# Run with coverage
 pytest --cov-config=.coveragerc --cov=ffsubsync tests/
-
-# Run integration tests only
 INTEGRATION=1 pytest -v -m 'integration' tests/
 ```
 
-### Type Checking
+Type checking:
+
 ```bash
-# Run mypy type checker
 mypy ffsubsync
 ```
 
-### Legacy Make Commands
+Legacy Make targets still exist:
+
 ```bash
-make clean        # Clean build artifacts
-make lint         # Run flake8 (deprecated, use ruff)
-make typecheck    # Run mypy
+make clean
+make lint
+make typecheck
 ```
 
-## Architecture
+Use focused commands while developing. Examples:
 
-### Core Algorithm (3-step synchronization)
-
-1. **Discretization**: Both video audio and subtitles are discretized into 10ms windows
-2. **Speech Detection**:
-   - Subtitles: Check if any subtitle is "on" during each window
-   - Audio: Use VAD (WebRTC or Auditok) to detect speech presence
-3. **Alignment**: Use FFT-based convolution (O(n log n)) to find optimal alignment between binary strings
-
-### Key Components
-
-**Pipeline Architecture** (inspired by scikit-learn):
-- `sklearn_shim.py`: Custom `Pipeline` and `TransformerMixin` implementation (no sklearn dependency)
-- Transformers follow fit/transform pattern for processing data through stages
-
-**Core Modules**:
-- `ffsubsync.py`: Main entry point, CLI argument parsing, orchestration
-- `aligners.py`: FFT-based and max-score alignment algorithms
-  - `FFTAligner`: Fast convolution-based alignment using numpy FFT
-  - `MaxScoreAligner`: Evaluates multiple framerate ratios to find best alignment
-- `speech_transformers.py`: Video/audio speech extraction transformers
-  - `VideoSpeechTransformer`: Extract speech from video using ffmpeg + VAD
-  - `SubtitleSpeechTransformer`: Convert subtitles to speech timeline
-  - `DeserializeSpeechTransformer`: Load pre-serialized speech data
-- `subtitle_transformers.py`: Subtitle manipulation transformers
-  - `SubtitleScaler`: Scale subtitle timing by framerate ratio
-  - `SubtitleShifter`: Apply time offset to subtitles
-  - `SubtitleMerger`: Merge multiple subtitle streams
-- `subtitle_parser.py`: Parse various subtitle formats (SRT, SSA/ASS via pysubs2)
-- `generic_subtitles.py`: `GenericSubtitle` wrapper for uniform subtitle handling
-- `ffmpeg_utils.py`: FFmpeg integration utilities
-- `golden_section_search.py`: Golden-section search for optimal framerate ratio
-- `constants.py`: Default values and configuration constants
-
-**Processing Pipeline Example**:
-```
-subtitle file -> SubtitleParser -> SubtitleScaler -> SubtitleSpeechTransformer -> binary string
-video file -> VideoSpeechTransformer -> binary string
-binary strings -> FFTAligner -> time offset -> SubtitleShifter -> synchronized output
+```bash
+uv run pytest -q tests/test_ssync.py
+uv run pytest -q tests/test_misc.py
+ruff check ffsubsync/ssync.py tests/test_ssync.py
+ruff format --check ffsubsync/ssync.py tests/test_ssync.py
 ```
 
-### VAD (Voice Activity Detection)
+## Core Algorithm
 
-Backends supported:
-- `webrtcvad-wheels` (default path: `--vad=webrtc`): Voice-specific detection
-- `TEN VAD` (`--vad=tenvad` or `--vad=subs_then_tenvad`) [optional extra]: Low-latency, lightweight, high-accuracy streaming VAD. Requires 16 kHz audio; ffsubsync auto-sets `--frame-rate` to 16000 when selected. Install with `pip install ffsubsync[tenvad]` (Linux x64/macOS) or `pip install ffsubsync[tenvad-onnx]` (ARM64). If TEN VAD is not installed, the code falls back to WebRTC.
+The normal synchronization pipeline is:
 
-## Code Quality Standards
+1. Discretize reference and subtitle speech into 10 ms windows
+   (`SAMPLE_RATE = 100`).
+2. Detect speech:
+   - Subtitles are parsed into active or inactive windows.
+   - Audio/video references are extracted with ffmpeg and a VAD backend.
+3. Align the binary timelines with FFT-based convolution.
+4. Shift and optionally scale subtitle timings, then write the output file.
 
-**Formatter & Linter**: Ruff (configured in `pyproject.toml`)
-- Line length: 88 characters (Black-compatible)
-- Target Python: 3.9+ (requires Python >= 3.9)
-- Pre-commit hooks enforce Ruff checks automatically
+Framerate mismatch handling is built into the alignment layer. Known ratios live
+in `constants.py` as `FRAMERATE_RATIOS`; golden-section search candidates are
+snapped only if they are within `FRAMERATE_SNAP_TOLERANCE = 0.005` of a known
+physical ratio.
 
-**Type Checking**: mypy with type hints preferred
+## Important Modules
 
-**Testing**: pytest with markers for unit (`-m 'not integration'`) and integration tests
+- `ffsubsync/ffsubsync.py`: low-level CLI parser and top-level sync
+  orchestration. `run()` validates args and delegates to `_run_impl()`.
+- `ffsubsync/ssync.py`: high-level `ssync` workflow. Key types are
+  `SsyncOptions`, `SsyncJob`, `SsyncSyncRequest`, and `SsyncResult`.
+- `ffsubsync/aligners.py`: `FFTAligner`, `SegmentedAligner`, and
+  `MaxScoreAligner`.
+- `ffsubsync/speech_transformers.py`: audio/video/subtitle speech extraction.
+- `ffsubsync/subtitle_transformers.py`: scaling, shifting, and merging subtitle
+  streams.
+- `ffsubsync/subtitle_parser.py`: SRT and SSA/ASS parsing through `srt` and
+  `pysubs2`.
+- `ffsubsync/generic_subtitles.py`: common subtitle abstraction.
+- `ffsubsync/preflight.py`: fast already-synced check used by `--preflight`.
+- `ffsubsync/ten_vad_onnx.py` and `ffsubsync/onnx_models/`: ONNX TEN-VAD
+  compatibility backend.
+- `ffsubsync/tools/piecewise_sync.py`: standalone tool for progressive mid-file
+  drift. Run with `python -m ffsubsync.tools.piecewise_sync`.
+- `ffsubsync/sklearn_shim.py`: small local `Pipeline` and `TransformerMixin`
+  shim. The project intentionally avoids a scikit-learn dependency.
 
-## CI/CD Pipeline
+## Alignment Strategy Notes
 
-GitHub Actions workflow (`.github/workflows/ci.yml`):
-1. **Code Quality**: Ruff linting and formatting (blocking)
-2. **pipx Installation Test**: Linux/macOS, Python 3.9-3.13
-3. **Unit Tests**: Linux/macOS, Python 3.9-3.13
-4. **Integration Tests**: Ubuntu only, Python 3.10-3.11
+`get_alignment_strategies()` builds a primary strategy from explicit CLI flags,
+then optionally adds adaptive strategies. By default, adaptive sync may try a GSS
+scale search and segmented voting unless the primary strategy already covers that
+configuration. `--no-auto-sync` disables these extra strategies.
 
-All stages must pass for PR approval.
+`_primary_has_no_drift()` is a cheap two-halves consistency check. If both halves
+agree with the primary offset within 0.5 seconds, adaptive segmented alignment is
+skipped.
 
-## Dependency Management
+`SegmentedAligner` performs sliding-window alignment with overlap. It uses a
+strict majority gate: more than half of usable windows must agree on an offset
+bin, otherwise it raises `FailedToFindAlignmentException`. It exposes
+`confidence_` and `vote_ratio_` for diagnostics.
 
-**Runtime Dependencies** (`pyproject.toml`):
-- `ffmpeg-python`: FFmpeg wrapper for audio extraction
-- `numpy`: FFT computations and array processing
-- `srt`, `pysubs2`: Subtitle format parsing
-- `webrtcvad-wheels`: Voice activity detection (default)
-- Optional VAD backends: `ten-vad` (install with extra `tenvad`), `onnxruntime` (install with extra `tenvad-onnx` for ARM64)
-- `rich`, `tqdm`: CLI output formatting
-- `chardet`, `charset_normalizer`, `faust-cchardet`: Character encoding detection
+When working on late-from-start or long-file alignment bugs, the highest-signal
+tests are usually `tests/test_segmented_aligner.py` and
+`tests/test_strategy_selection.py`.
 
-**Dev Dependencies**: black, flake8, mypy, pytest, pytest-cov, ruff, twine
+## VAD Backends
 
-**External Requirement**: ffmpeg must be installed on system (`brew install ffmpeg` on macOS)
+`DEFAULT_VAD` is `subs_then_webrtc`. For video/audio references this first tries
+subtitle-stream based extraction where possible, then falls back to WebRTC audio
+VAD.
 
-## Important Implementation Details
+Supported explicit VAD choices include:
 
-- **No sklearn dependency**: Custom `Pipeline` implementation in `sklearn_shim.py` to avoid heavy dependencies
-- **Encoding detection**: Uses multiple libraries (faust-cchardet, chardet, charset_normalizer) for robust subtitle encoding detection
-- **Framerate handling**: Can sync subtitles with different framerates using `--gss` (golden-section search) or default ratio checks
-- **Serialization**: Can serialize/deserialize speech data (`.npz` files) to skip expensive audio extraction
-- **Platform-specific**: Unix-only design, uses POSIX-specific features
+- `webrtc`: WebRTC VAD through `webrtcvad-wheels`.
+- `subs_then_webrtc`: subtitle-stream first, then WebRTC.
+- `tenvad`: TEN-VAD native backend.
+- `subs_then_tenvad`: subtitle-stream first, then TEN-VAD.
+- `whisper`: Whisper-based speech extraction.
 
-## Common Development Workflows
+TEN-VAD requires 16 kHz audio; the code adjusts frame rate automatically for
+TEN-VAD modes. Optional extras:
 
-### Adding a new VAD backend
-1. Add detector function in `speech_transformers.py` (follow `_make_webrtcvad_detector` pattern)
-2. Register in `VideoSpeechTransformer.__init__` VAD selection logic
-3. Add to `constants.py` if needed
-4. Update tests in `tests/`
+- `pip install ffsubsync[tenvad]`: native TEN-VAD. Linux x64 and macOS.
+- `pip install ffsubsync[tenvad-onnx]`: ONNX Runtime backend, including Linux
+  ARM64 support.
 
-### Supporting a new subtitle format
-1. Extend `subtitle_parser.py` with new parser
-2. Update `GenericSubtitle` in `generic_subtitles.py` if format requires new handling
-3. Add format to `SUBTITLE_EXTENSIONS` in `constants.py`
-4. Add tests in `tests/test_subtitles.py`
+If native `ten-vad` import fails, the code attempts the ONNX backend before
+falling back to WebRTC.
 
-### Debugging sync failures
-- Use `--make-test-case` to create test archive with debug data
-- Check `--max-offset-seconds` if offset > 60s
-- Try `--no-fix-framerate` to assume identical framerates
-- Try `--gss` for exhaustive framerate ratio search
-- Try `--vad=tenvad` for potentially better accuracy (requires extra install)
+## Testing Guide
 
-## Testing Notes
+Unit tests are designed to be fast and run without integration test data. Mark
+slow external-data tests with `@pytest.mark.integration`; integration tests
+require `INTEGRATION=1`.
 
-- **Unit tests**: Fast, no external dependencies, run on every commit
-- **Integration tests**: Require test data files, slower, run on Ubuntu only in CI
-- **Markers**: Use `@pytest.mark.integration` for integration tests
-- Integration tests require `INTEGRATION=1` environment variable
+Test files by area:
+
+- `tests/test_ssync.py`: `ssync` path resolution, reference policy, and CLI
+  workflow.
+- `tests/test_misc.py`: parser and version helpers.
+- `tests/test_alignment.py`: core aligner behavior.
+- `tests/test_segmented_aligner.py`: segmented voting and tail-window behavior.
+- `tests/test_strategy_selection.py`: adaptive strategy and framerate-ratio
+  selection.
+- `tests/test_tenvad_backend.py`: TEN-VAD backend selection and fallback.
+- `tests/test_subtitles.py`: subtitle parsing and transformations.
+- `tests/test_integration.py`: integration scenarios gated by `INTEGRATION=1`.
+
+For changes to `ssync`, prefer tests against pure workflow functions and an
+injected executor instead of monkeypatching `sys.argv` or the global `run`
+function.
+
+## Code Quality And Style
+
+Ruff is the formatter and linter. Configuration is in `pyproject.toml`:
+
+- line length: 88
+- target: Python 3.10
+- selected lint families: `E`, `W`, `F`, `I`, `B`, `C4`, `UP`, `SIM`, `RUF`
+- notable ignores: `E501`, `E722`, `B008`
+
+Black and flake8 remain in development dependencies for legacy workflows, but
+Ruff is authoritative for current formatting and linting.
+
+Type hints are preferred, but the codebase is only partially typed and uses
+numpy heavily. Do not introduce broad type-only refactors unless needed for the
+task.
+
+## Common Workflows
+
+Adding a VAD backend:
+
+1. Add a detector factory in `speech_transformers.py`.
+2. Register selection and fallback behavior in `VideoSpeechTransformer`.
+3. Add constants or CLI choices if needed.
+4. Add focused tests, usually near `tests/test_tenvad_backend.py`.
+
+Adding subtitle format support:
+
+1. Extend parsing in `subtitle_parser.py`.
+2. Update `GenericSubtitle` or related abstractions if needed.
+3. Add the extension to `SUBTITLE_EXTENSIONS` in `constants.py`.
+4. Add tests in `tests/test_subtitles.py`.
+
+Debugging sync failures:
+
+- Use `--make-test-case` to capture debug data.
+- Increase `--max-offset-seconds` if the real offset may exceed 60 seconds.
+- Try `--no-fix-framerate` when framerates are known to match.
+- Try `--gss` for exhaustive framerate-ratio search.
+- Try `--use-segmented-aligner` for long intros, sparse speech, or misleading
+  global matches.
+- Try `--vad=tenvad` when WebRTC speech detection appears weak.
+- Use `--preflight` to skip full sync when subtitles are probably already
+  aligned.
+- Use `python -m ffsubsync.tools.piecewise_sync` for progressive mid-file drift.
+
+## CI
+
+GitHub Actions runs:
+
+1. Ruff and pre-commit quality checks on Ubuntu with Python 3.11.
+2. pipx installation checks on Ubuntu and macOS for Python 3.10 through 3.13.
+3. Unit tests on Ubuntu and macOS for Python 3.10 through 3.13.
+4. Integration tests on Ubuntu for Python 3.10 and 3.11.
+
+CI verifies `ffsubsync`, `ffs`, and `subsync` help output in the pipx job. It
+does not currently verify `ssync` there, so local `ssync` workflow tests matter.

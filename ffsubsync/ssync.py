@@ -5,7 +5,10 @@ import locale
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Literal
 
 from ffsubsync.ffsubsync import make_parser, run
 
@@ -16,6 +19,65 @@ LANG_ALIASES = {
     "fin": ("fin", "fi"),
     "fi": ("fi", "fin"),
 }
+VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".mkv",
+    ".avi",
+    ".m4v",
+    ".ts",
+    ".mov",
+    ".webm",
+    ".flv",
+    ".wmv",
+    ".mpg",
+    ".mpeg",
+    ".ogv",
+    ".3gp",
+}
+
+ReferenceSource = Literal["audio", "embedded"]
+ResultStatus = Literal["synced", "failed", "skipped", "dry_run"]
+
+
+@dataclass(frozen=True)
+class SsyncOptions:
+    input_path: Path
+    lang: str
+    dry_run: bool = False
+    preflight: bool = False
+    reference_source: ReferenceSource = "audio"
+
+
+@dataclass(frozen=True)
+class SsyncJob:
+    video: Path
+    subtitle: Path
+    output: Path
+    lang: str
+    reference_source: ReferenceSource
+    preflight: bool = False
+
+
+@dataclass(frozen=True)
+class SsyncSyncRequest:
+    reference: Path
+    subtitle: Path
+    output: Path
+    preflight: bool
+    force_audio_vad: bool
+    message: str
+
+
+@dataclass(frozen=True)
+class SsyncResult:
+    video: Path
+    job: SsyncJob | None
+    status: ResultStatus
+    return_code: int = 0
+    skipped_reason: str | None = None
+    message: str | None = None
+    offset_seconds: Any = None
+    framerate_scale_factor: Any = None
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -42,6 +104,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print resolved paths and ffsubsync arguments without running sync",
     )
     parser.add_argument(
+        "--reference-source",
+        choices=("audio", "embedded"),
+        default="audio",
+        help="Reference source to sync against (default: audio)",
+    )
+    parser.add_argument(
         "--preflight",
         "--skip-if-synced",
         action="store_true",
@@ -50,6 +118,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "appears already aligned. Default: off.",
     )
     return parser
+
+
+def parse_options(argv: Sequence[str] | None = None) -> SsyncOptions:
+    args = _build_parser().parse_args(argv)
+    return SsyncOptions(
+        input_path=Path(args.video),
+        lang=args.lang or DEFAULT_SUB_LANG,
+        dry_run=args.dry_run,
+        preflight=args.preflight,
+        reference_source=args.reference_source,
+    )
 
 
 def _candidate_subtitle_paths(video_path: Path, lang: str) -> list[Path]:
@@ -172,118 +251,197 @@ def _print(*args: object) -> None:
     print(*args, file=sys.stderr)
 
 
-def main() -> int:
-    parser = _build_parser()
-    args = parser.parse_args()
+def resolve_videos(input_path: Path) -> list[Path]:
+    if not input_path.exists():
+        raise FileNotFoundError(f"Video file or directory not found: {input_path}")
 
-    lang = args.lang or DEFAULT_SUB_LANG
+    if not input_path.is_dir():
+        return [input_path]
+
+    return sorted(
+        p
+        for p in input_path.rglob("*")
+        if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+    )
+
+
+def resolve_jobs(
+    videos: Sequence[Path], options: SsyncOptions
+) -> tuple[list[SsyncJob], list[SsyncResult]]:
+    jobs: list[SsyncJob] = []
+    skipped: list[SsyncResult] = []
+    for video in videos:
+        subtitle = _find_subtitle(video, options.lang)
+        if subtitle is None:
+            skipped.append(
+                SsyncResult(
+                    video=video,
+                    job=None,
+                    status="skipped",
+                    skipped_reason=(
+                        f"Subtitle file for {video.stem} not found. "
+                        "Skipping gracefully."
+                    ),
+                )
+            )
+            continue
+
+        jobs.append(
+            SsyncJob(
+                video=video,
+                subtitle=subtitle,
+                output=_resolve_output_path(subtitle),
+                lang=options.lang,
+                reference_source=options.reference_source,
+                preflight=options.preflight,
+            )
+        )
+
+    return jobs, skipped
+
+
+def choose_reference_source(job: SsyncJob, temp_dir: Path) -> SsyncSyncRequest:
+    if job.reference_source == "audio":
+        return SsyncSyncRequest(
+            reference=job.video,
+            subtitle=job.subtitle,
+            output=job.output,
+            preflight=job.preflight,
+            force_audio_vad=True,
+            message=f"Synchronizing subtitles for {job.video.name} using audio track as reference",
+        )
+
+    embedded_stream = _pick_reference_subtitle_stream(
+        _embedded_subtitle_streams(job.video), job.lang
+    )
+    if embedded_stream is None:
+        return SsyncSyncRequest(
+            reference=job.video,
+            subtitle=job.subtitle,
+            output=job.output,
+            preflight=job.preflight,
+            force_audio_vad=True,
+            message="No embedded subtitle reference found; using audio track as reference",
+        )
+
+    extracted = _extract_embedded_reference_subtitle(
+        job.video, embedded_stream, temp_dir
+    )
+    if extracted is None:
+        return SsyncSyncRequest(
+            reference=job.video,
+            subtitle=job.subtitle,
+            output=job.output,
+            preflight=job.preflight,
+            force_audio_vad=True,
+            message=(
+                "Embedded subtitle stream could not be extracted; "
+                "using audio track as reference"
+            ),
+        )
+
+    return SsyncSyncRequest(
+        reference=extracted,
+        subtitle=job.subtitle,
+        output=job.output,
+        preflight=job.preflight,
+        force_audio_vad=False,
+        message=(
+            f"Synchronizing subtitles for {job.video.name} using embedded subtitle "
+            f"stream #{embedded_stream.get('index')} as reference"
+        ),
+    )
+
+
+def build_sync_args(request: SsyncSyncRequest) -> argparse.Namespace:
+    args = make_parser().parse_args([])
+    args.reference = str(request.reference)
+    args.srtin = [str(request.subtitle)]
+    args.srtout = str(request.output)
+    args.output_encoding = "same"
+    args.preflight = request.preflight
+    if request.force_audio_vad:
+        # ssync owns embedded-reference selection. When a video is the reference,
+        # force audio VAD instead of allowing ffsubsync to prefer subtitle streams.
+        args.vad = "webrtc"
+    return args
+
+
+def _dry_run_job(job: SsyncJob) -> SsyncResult:
+    _print(f"Reference source: {job.reference_source}")
+    _print(f"Reference video: {job.video}")
+    if job.reference_source == "embedded":
+        embedded_stream = _pick_reference_subtitle_stream(
+            _embedded_subtitle_streams(job.video), job.lang
+        )
+        if embedded_stream is not None:
+            _print(
+                "Embedded subtitle reference: "
+                f"stream #{embedded_stream.get('index')} "
+                f"({_stream_language(embedded_stream) or 'unknown'})"
+            )
+        else:
+            _print("Embedded subtitle reference: none; would use audio")
+    _print(f"Input subtitle: {job.subtitle}")
+    _print(f"Output subtitle: {job.output}")
+    return SsyncResult(video=job.video, job=job, status="dry_run")
+
+
+def execute_job(
+    job: SsyncJob,
+    executor: Callable[[argparse.Namespace], Mapping[str, Any]],
+) -> SsyncResult:
+    with tempfile.TemporaryDirectory(prefix="ffsubsync-ssync-") as temp_name:
+        request = choose_reference_source(job, Path(temp_name))
+        _print(request.message)
+        result = executor(build_sync_args(request))
+
+    retval = int(result.get("retval", 1))
+    return SsyncResult(
+        video=job.video,
+        job=job,
+        status="synced" if retval == 0 else "failed",
+        return_code=retval,
+        message=request.message,
+        offset_seconds=result.get("offset_seconds"),
+        framerate_scale_factor=result.get("framerate_scale_factor"),
+    )
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    executor: Callable[[argparse.Namespace], Mapping[str, Any]] = run,
+) -> int:
+    options = parse_options(argv)
+
     with contextlib.suppress(Exception):
         locale.setlocale(locale.LC_ALL, "")
 
-    video_path = Path(args.video)
-    if not video_path.exists():
-        _print(f"Video file or directory not found: {video_path}")
+    try:
+        videos = resolve_videos(options.input_path)
+    except FileNotFoundError as e:
+        _print(e)
         return 1
 
-    if video_path.is_dir():
-        video_extensions = {
-            ".mp4",
-            ".mkv",
-            ".avi",
-            ".m4v",
-            ".ts",
-            ".mov",
-            ".webm",
-            ".flv",
-            ".wmv",
-            ".mpg",
-            ".mpeg",
-            ".ogv",
-            ".3gp",
-        }
-        video_files = []
-        for p in video_path.rglob("*"):
-            if p.is_file() and p.suffix.lower() in video_extensions:
-                video_files.append(p)
-        video_files = sorted(video_files)
-        if not video_files:
-            _print(f"No video files found in directory: {video_path}")
-            return 0
-    else:
-        video_files = [video_path]
+    if not videos:
+        _print(f"No video files found in directory: {options.input_path}")
+        return 0
+
+    jobs, skipped = resolve_jobs(videos, options)
+    skipped_by_video = {result.video: result for result in skipped}
 
     exit_code = 0
-    for video in video_files:
-        _print(f"Processing subtitles for {video.name} (Language: {lang})")
-
-        subtitle = _find_subtitle(video, lang)
-        if subtitle is None:
-            _print(f"Subtitle file for {video.stem} not found. Skipping gracefully.")
+    for video in videos:
+        _print(f"Processing subtitles for {video.name} (Language: {options.lang})")
+        skipped_result = skipped_by_video.get(video)
+        if skipped_result is not None:
+            _print(skipped_result.skipped_reason)
             continue
 
-        output = _resolve_output_path(subtitle)
-        ffsubsync_extra: list[str] = []
-        if args.preflight:
-            ffsubsync_extra.append("--preflight")
-
-        embedded_stream = _pick_reference_subtitle_stream(
-            _embedded_subtitle_streams(video), lang
-        )
-
-        if args.dry_run:
-            _print(f"Reference video: {video}")
-            if embedded_stream is not None:
-                _print(
-                    "Embedded subtitle reference: "
-                    f"stream #{embedded_stream.get('index')} "
-                    f"({_stream_language(embedded_stream) or 'unknown'})"
-                )
-            else:
-                _print("Embedded subtitle reference: none; would use audio")
-            _print(f"Input subtitle: {subtitle}")
-            _print(f"Output subtitle: {output}")
-            continue
-
-        with tempfile.TemporaryDirectory(prefix="ffsubsync-ssync-") as temp_name:
-            reference: Path = video
-            if embedded_stream is not None:
-                extracted = _extract_embedded_reference_subtitle(
-                    video, embedded_stream, Path(temp_name)
-                )
-                if extracted is not None:
-                    reference = extracted
-                    _print(
-                        "Synchronizing subtitles for "
-                        f"{video.name} using embedded subtitle stream "
-                        f"#{embedded_stream.get('index')} as reference"
-                    )
-                else:
-                    _print(
-                        "Embedded subtitle stream could not be extracted; "
-                        "using audio track as reference"
-                    )
-            else:
-                _print(
-                    f"Synchronizing subtitles for {video.name} using audio track as reference"
-                )
-
-            ffsubsync_args = make_parser().parse_args(
-                [
-                    str(reference),
-                    "-i",
-                    str(subtitle),
-                    "-o",
-                    str(output),
-                    "--output-encoding",
-                    "same",
-                    *ffsubsync_extra,
-                ]
-            )
-
-            result = run(ffsubsync_args)
-            retval = int(result.get("retval", 1))
-            if retval != 0:
-                exit_code = retval
+        job = next(job for job in jobs if job.video == video)
+        result = _dry_run_job(job) if options.dry_run else execute_job(job, executor)
+        if result.return_code != 0:
+            exit_code = result.return_code
 
     return exit_code
 

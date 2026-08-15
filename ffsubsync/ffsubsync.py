@@ -31,6 +31,13 @@ from ffsubsync.constants import (
     SUBTITLE_EXTENSIONS,
 )
 from ffsubsync.ffmpeg_utils import ffmpeg_bin_path
+from ffsubsync.piecewise import (
+    DEFAULT_OVERLAP_SECONDS as DEFAULT_PIECEWISE_OVERLAP_SECONDS,
+    DEFAULT_WINDOW_SIZE_SECONDS as DEFAULT_PIECEWISE_WINDOW_SECONDS,
+    Anchor,
+    build_anchors,
+    compute_window_offsets,
+)
 from ffsubsync.preflight import check_already_synced
 from ffsubsync.sklearn_shim import Pipeline, TransformerMixin
 from ffsubsync.speech_transformers import (
@@ -40,7 +47,11 @@ from ffsubsync.speech_transformers import (
     make_subtitle_speech_pipeline,
 )
 from ffsubsync.subtitle_parser import make_subtitle_parser
-from ffsubsync.subtitle_transformers import SubtitleMerger, SubtitleShifter
+from ffsubsync.subtitle_transformers import (
+    PiecewiseSubtitleShifter,
+    SubtitleMerger,
+    SubtitleShifter,
+)
 from ffsubsync.version import get_version
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -206,6 +217,64 @@ def _primary_has_no_drift(
         and abs(off_a - primary_offset) <= tolerance_samples
         and abs(off_b - primary_offset) <= tolerance_samples
     )
+
+
+def _compute_piecewise_anchors(
+    args: argparse.Namespace,
+    reference_speech: np.ndarray,
+    best_srt_pipe: Pipeline,
+    offset_samples: int,
+) -> list[Anchor]:
+    """Measure residual drift left over after the global scale+offset fit.
+
+    Operates on the cached speech arrays, so no extra audio pass is needed.
+    Returns an empty list when the residual drift is not trustworthy enough to
+    act on, in which case the caller keeps the plain global result.
+    """
+    try:
+        subtitle_speech = best_srt_pipe.transform(None)
+        if isinstance(subtitle_speech, str):
+            subtitle_speech = np.array(list(map(int, subtitle_speech)), dtype=float)
+        else:
+            subtitle_speech = np.asarray(subtitle_speech, dtype=float)
+
+        # Move the subtitle timeline by the global offset already chosen, so
+        # the windows below measure only what that global fit left behind.
+        shifted = np.zeros_like(subtitle_speech)
+        if offset_samples > 0:
+            shifted[offset_samples:] = subtitle_speech[
+                : len(subtitle_speech) - offset_samples
+            ]
+        elif offset_samples < 0:
+            shifted[: len(subtitle_speech) + offset_samples] = subtitle_speech[
+                -offset_samples:
+            ]
+        else:
+            shifted = subtitle_speech
+
+        window_offsets = compute_window_offsets(
+            reference_speech,
+            shifted,
+            sample_rate=SAMPLE_RATE,
+            window_size_seconds=args.piecewise_window_seconds,
+            overlap_seconds=args.piecewise_overlap_seconds,
+        )
+        anchors = build_anchors(window_offsets)
+    except Exception:
+        logger.exception("piecewise drift estimation failed; keeping global sync")
+        return []
+
+    if not anchors:
+        logger.info(
+            "piecewise: no usable anchors from %d windows; keeping global sync",
+            len(window_offsets),
+        )
+        return []
+
+    logger.info("piecewise: %d anchors (time -> residual offset)", len(anchors))
+    for anchor in anchors:
+        logger.info("  %8.1fs -> %+.3fs", anchor.time, anchor.offset)
+    return anchors
 
 
 def compute_alignment(
@@ -450,6 +519,20 @@ def try_sync(
             output_steps: list[tuple[str, TransformerMixin]] = [
                 ("shift", SubtitleShifter(offset_seconds))
             ]
+            if getattr(args, "piecewise_audio", False) and not skip_sync:
+                anchors = _compute_piecewise_anchors(
+                    args, reference_speech, best_srt_pipe, offset_samples
+                )
+                if anchors:
+                    result["piecewise_anchors"] = [(a.time, a.offset) for a in anchors]
+                    output_steps.append(
+                        (
+                            "piecewise",
+                            PiecewiseSubtitleShifter(
+                                [(a.time, a.offset) for a in anchors]
+                            ),
+                        )
+                    )
             if args.merge_with_reference:
                 output_steps.append(
                     ("merge", SubtitleMerger(reference_pipe.named_steps["parse"].subs_))
@@ -976,6 +1059,29 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
         help="Disable adaptive auto-sync strategy selection. "
         "By default, ffsubsync evaluates additional robust strategies and "
         "selects the best-scoring result.",
+    )
+    parser.add_argument(
+        "--piecewise-audio",
+        action="store_true",
+        help="After the global fit, correct remaining mid-file drift by "
+        "measuring residual offsets in overlapping windows of the reference "
+        "audio and warping subtitle timings between them.",
+    )
+    parser.add_argument(
+        "--piecewise-window-seconds",
+        type=float,
+        default=DEFAULT_PIECEWISE_WINDOW_SECONDS,
+        help="Window size in seconds for piecewise drift measurement "
+        f"(default={DEFAULT_PIECEWISE_WINDOW_SECONDS:g}). "
+        "Only used with --piecewise-audio.",
+    )
+    parser.add_argument(
+        "--piecewise-overlap-seconds",
+        type=float,
+        default=DEFAULT_PIECEWISE_OVERLAP_SECONDS,
+        help="Window overlap in seconds for piecewise drift measurement "
+        f"(default={DEFAULT_PIECEWISE_OVERLAP_SECONDS:g}). "
+        "Only used with --piecewise-audio.",
     )
     parser.add_argument(
         "--use-segmented-aligner",

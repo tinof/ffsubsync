@@ -66,6 +66,13 @@ python -m ffsubsync.tools.piecewise_sync reference.srt input.srt output.srt --ve
 
 ## Roadmap: Future Work
 
+### DONE: Audio-based piecewise sync
+
+`--piecewise-audio` (engine) / `ssync --piecewise` measures residual per-window
+offsets against the reference audio after the global fit and warps cue timings
+between filtered anchors. See `ffsubsync/piecewise.py`. On a real drifting
+episode this cut median windowed residual from 2.54s to 0.18s.
+
 ### Priority 1: Integration into Main CLI
 
 **Goal**: Add `--piecewise` flag to main `ffs` command.

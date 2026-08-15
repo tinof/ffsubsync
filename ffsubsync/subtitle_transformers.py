@@ -2,6 +2,8 @@ import logging
 import numbers
 from datetime import timedelta
 
+import numpy as np
+
 from ffsubsync.generic_subtitles import GenericSubtitle, GenericSubtitlesFile, SubsMixin
 from ffsubsync.sklearn_shim import TransformerMixin
 
@@ -43,6 +45,46 @@ class SubtitleScaler(SubsMixin, TransformerMixin):
                 )
             )
         self.subs_ = subs.clone_props_for_subs(scaled_subs)
+        return self
+
+    def transform(self, *_):
+        return self.subs_
+
+
+class PiecewiseSubtitleShifter(SubsMixin, TransformerMixin):
+    """Shift cues by a time-varying offset interpolated between anchors.
+
+    ``anchors`` is a sequence of ``(time_seconds, offset_seconds)`` knots in
+    reference time. Offsets are linearly interpolated over cue start times and
+    held constant beyond the first and last anchor. Cue durations are
+    preserved exactly.
+    """
+
+    def __init__(self, anchors):
+        super(SubsMixin, self).__init__()
+        anchors = sorted(anchors, key=lambda a: a[0])
+        if len(anchors) < 2:
+            raise ValueError("piecewise shifting needs at least two anchors")
+        self.anchor_times = [float(t) for t, _ in anchors]
+        self.anchor_offsets = [float(o) for _, o in anchors]
+
+    def offset_at(self, seconds: float) -> float:
+        return float(np.interp(seconds, self.anchor_times, self.anchor_offsets))
+
+    def fit(self, subs: GenericSubtitlesFile, *_):
+        shifted_subs = []
+        for sub in subs:
+            start = sub.start.total_seconds()
+            duration = sub.end.total_seconds() - start
+            new_start = max(0.0, start + self.offset_at(start))
+            shifted_subs.append(
+                GenericSubtitle(
+                    timedelta(seconds=new_start),
+                    timedelta(seconds=new_start + duration),
+                    sub.inner,
+                )
+            )
+        self.subs_ = subs.clone_props_for_subs(shifted_subs)
         return self
 
     def transform(self, *_):

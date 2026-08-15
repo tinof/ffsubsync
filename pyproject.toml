@@ -82,9 +82,10 @@ ffsubsync = "ffsubsync:main"
 ffs = "ffsubsync:main"
 subsync = "ffsubsync:main"
 ssync = "ffsubsync.ssync:main"
+piecewise-sync = "ffsubsync.tools.piecewise_sync:main"
 
 [tool.setuptools]
-packages = ["ffsubsync"]
+packages = ["ffsubsync", "ffsubsync.tools"]
 include-package-data = true
 
 [tool.setuptools.package-data]

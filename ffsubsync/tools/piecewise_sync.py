@@ -20,6 +20,7 @@ Usage:
 import argparse
 import re
 from collections import defaultdict
+from collections.abc import Sequence
 
 try:
     import numpy as np
@@ -346,7 +347,7 @@ def verify_sync(
     }
 
 
-def main():
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Piecewise subtitle synchronization for difficult drift cases",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -386,7 +387,7 @@ This tool handles cases where standard ffsubsync fails due to:
         help="Verification threshold in milliseconds (default: 1000)",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # Parse input files
     print(f"Loading reference: {args.reference}")
@@ -415,6 +416,8 @@ This tool handles cases where standard ffsubsync fails due to:
         )
         print(f"  Max gap: {metrics['max_gap']}ms ({metrics['max_gap'] / 1000:.1f}s)")
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -24,6 +24,9 @@ setuptools and Versioneer.
 - `ffsubsync`, `ffs`, and `subsync`: equivalent low-level CLIs implemented by
   `ffsubsync:main`. These expect explicit reference/input/output arguments.
 - `ssync`: convenience workflow implemented by `ffsubsync.ssync:main`.
+- `piecewise-sync`: standalone piecewise drift tool implemented by
+  `ffsubsync.tools.piecewise_sync:main` (also runnable as
+  `python -m ffsubsync.tools.piecewise_sync`).
 
 `ssync` is a first-class workflow:
 
@@ -32,7 +35,9 @@ setuptools and Versioneer.
 - Plain `ssync` scans the current directory recursively for videos and processes
   them in sorted order.
 - The default subtitle language is Finnish (`fin`), with `fin`/`fi` aliases.
+- Subtitle candidate discovery searches in order: target language `.srt`, bare `<stem>.srt`, target language `.sub` (converted to `.srt` via ffmpeg ISO-8859-15, deleting the source `.sub` on success), fallback language `.srt`, and fallback language `.sub`. Matching is case-insensitive via a directory index (`_case_insensitive_index()`), so `.fin.srt`, `.FIN.srt`, and `.Fin.srt` all resolve on case-sensitive filesystems; the real on-disk path is what gets rewritten in place.
 - `--lang` changes the suffix used for subtitle discovery.
+- `--fallback-lang` changes the fallback language suffix used when no target-language subtitle is found (default: `en`). Setting `--fallback-lang ""` disables the fallback pass.
 - `--preflight` is passed through to the sync engine.
 - `--reference-source audio` is the default and does not probe embedded subtitle
   streams.
@@ -41,6 +46,19 @@ setuptools and Versioneer.
   audio if extraction fails.
 - `--dry-run` reports resolved jobs and reference policy without running
   extraction or synchronization.
+- Advanced tuning flags are forwarded to the sync engine for when the default
+  sync is off: `--gss`, `--vad`, `--max-offset-seconds`,
+  `--use-segmented-aligner`, `--no-fix-framerate`, and `--no-auto-sync`. An
+  explicit `--vad` overrides the `webrtc` VAD that ssync forces for audio
+  references.
+- `--piecewise` corrects progressive mid-file drift that a single offset and
+  scale cannot fix. Against the **audio** by default (`ffsubsync/piecewise.py`
+  measures residual offsets in overlapping windows of the cached speech
+  timeline and warps cue timings between the resulting anchors, using no extra
+  ffmpeg pass). With `--reference-source embedded` it instead runs
+  `ffsubsync.tools.piecewise_sync` against an extracted embedded subtitle
+  stream, and skips a video (exit code unchanged) when no embedded stream is
+  available; `--piecewise-window` (milliseconds) applies only to that path.
 
 On this Ubuntu machine, prior local deployment used a `pipxu` managed install and
 `/home/ubuntu/bin/ssync` is a user-facing wrapper. If the user asks to install or
@@ -145,6 +163,13 @@ physical ratio.
   `pysubs2`.
 - `ffsubsync/generic_subtitles.py`: common subtitle abstraction.
 - `ffsubsync/preflight.py`: fast already-synced check used by `--preflight`.
+- `ffsubsync/piecewise.py`: audio-based drift correction. `compute_window_offsets()`
+  measures residual offsets per window on the 100 Hz binary speech arrays;
+  `build_anchors()` filters them (rank-based score gate, median-filter outlier
+  rejection, monotonicity) into anchors applied by `PiecewiseSubtitleShifter`.
+  Wired into the engine by `--piecewise-audio` and into `ssync` by `--piecewise`.
+  Note FFT scores are unnormalized and often negative, so score gating must be
+  rank-based, never relative to a mean or median.
 - `ffsubsync/ten_vad_onnx.py` and `ffsubsync/onnx_models/`: ONNX TEN-VAD
   compatibility backend.
 - `ffsubsync/tools/piecewise_sync.py`: standalone tool for progressive mid-file

@@ -14,6 +14,16 @@ from ffsubsync.ffsubsync import make_parser, run
 
 DEFAULT_SUB_LANG = "fin"
 SUBTITLE_EXT = "srt"
+SUB_EXT = "sub"
+DEFAULT_FALLBACK_LANG = "en"
+DEFAULT_PIECEWISE_WINDOW_MS = 60000
+VAD_CHOICES = (
+    "subs_then_webrtc",
+    "webrtc",
+    "subs_then_tenvad",
+    "tenvad",
+    "whisper",
+)
 PREFERRED_REFERENCE_LANGS = ("eng", "en")
 LANG_ALIASES = {
     "fin": ("fin", "fi"),
@@ -40,12 +50,39 @@ ResultStatus = Literal["synced", "failed", "skipped", "dry_run"]
 
 
 @dataclass(frozen=True)
+class SubtitleCandidate:
+    subtitle: Path
+    convert_from: Path | None
+    lang: str
+    is_fallback: bool
+
+
+@dataclass(frozen=True)
+class SyncTuning:
+    """Advanced ffsubsync knobs exposed through ssync.
+
+    Fields left at ``None``/``False`` keep the ffsubsync parser defaults.
+    """
+
+    gss: bool = False
+    vad: str | None = None
+    max_offset_seconds: float | None = None
+    use_segmented_aligner: bool = False
+    no_fix_framerate: bool = False
+    no_auto_sync: bool = False
+
+
+@dataclass(frozen=True)
 class SsyncOptions:
     input_path: Path
     lang: str
+    fallback_lang: str = DEFAULT_FALLBACK_LANG
     dry_run: bool = False
     preflight: bool = False
     reference_source: ReferenceSource = "audio"
+    tuning: SyncTuning = SyncTuning()
+    piecewise: bool = False
+    piecewise_window: int = DEFAULT_PIECEWISE_WINDOW_MS
 
 
 @dataclass(frozen=True)
@@ -55,7 +92,11 @@ class SsyncJob:
     output: Path
     lang: str
     reference_source: ReferenceSource
+    candidate: SubtitleCandidate | None = None
     preflight: bool = False
+    tuning: SyncTuning = SyncTuning()
+    piecewise: bool = False
+    piecewise_window: int = DEFAULT_PIECEWISE_WINDOW_MS
 
 
 @dataclass(frozen=True)
@@ -66,6 +107,8 @@ class SsyncSyncRequest:
     preflight: bool
     force_audio_vad: bool
     message: str
+    tuning: SyncTuning = SyncTuning()
+    piecewise_audio: bool = False
 
 
 @dataclass(frozen=True)
@@ -99,6 +142,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f"Subtitle language suffix to match (default: {DEFAULT_SUB_LANG})",
     )
     parser.add_argument(
+        "--fallback-lang",
+        default=DEFAULT_FALLBACK_LANG,
+        help=(
+            "Fallback subtitle language suffix to match when target language is "
+            f"not found (default: {DEFAULT_FALLBACK_LANG}). Set to empty string to disable."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print resolved paths and ffsubsync arguments without running sync",
@@ -106,7 +157,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reference-source",
         choices=("audio", "embedded"),
-        default="audio",
+        default=None,
         help="Reference source to sync against (default: audio)",
     )
     parser.add_argument(
@@ -117,41 +168,180 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run a fast pre-check (~2 min of audio). Skip full sync if subtitle "
         "appears already aligned. Default: off.",
     )
+
+    tuning = parser.add_argument_group(
+        "advanced sync tuning",
+        "Forwarded to the ffsubsync engine when the default sync is off.",
+    )
+    tuning.add_argument(
+        "--gss",
+        action="store_true",
+        help="Use golden-section search for the framerate ratio",
+    )
+    tuning.add_argument(
+        "--vad",
+        choices=VAD_CHOICES,
+        default=None,
+        help="Voice activity detector to use (overrides ssync's audio default)",
+    )
+    tuning.add_argument(
+        "--max-offset-seconds",
+        type=float,
+        default=None,
+        help="Max allowed offset in seconds (raise when the shift is large)",
+    )
+    tuning.add_argument(
+        "--use-segmented-aligner",
+        action="store_true",
+        help="Use the segmented voting aligner (long intros, sparse speech)",
+    )
+    tuning.add_argument(
+        "--no-fix-framerate",
+        action="store_true",
+        help="Do not attempt framerate mismatch correction",
+    )
+    tuning.add_argument(
+        "--no-auto-sync",
+        action="store_true",
+        help="Disable adaptive auto-sync strategy selection",
+    )
+
+    piecewise = parser.add_argument_group(
+        "piecewise mode",
+        "For progressive mid-file drift that a single offset cannot fix.",
+    )
+    piecewise.add_argument(
+        "--piecewise",
+        action="store_true",
+        help="Correct drift piece by piece. Against the audio by default; "
+        "with --reference-source embedded, warps against an extracted "
+        "embedded subtitle stream instead",
+    )
+    piecewise.add_argument(
+        "--piecewise-window",
+        type=int,
+        default=DEFAULT_PIECEWISE_WINDOW_MS,
+        help="Correction window in milliseconds for the embedded-reference "
+        f"piecewise path (default: {DEFAULT_PIECEWISE_WINDOW_MS})",
+    )
     return parser
 
 
 def parse_options(argv: Sequence[str] | None = None) -> SsyncOptions:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    reference_source: ReferenceSource = args.reference_source or "audio"
+
     return SsyncOptions(
         input_path=Path(args.video),
         lang=args.lang or DEFAULT_SUB_LANG,
+        fallback_lang=args.fallback_lang
+        if args.fallback_lang is not None
+        else DEFAULT_FALLBACK_LANG,
         dry_run=args.dry_run,
         preflight=args.preflight,
-        reference_source=args.reference_source,
+        reference_source=reference_source,
+        tuning=SyncTuning(
+            gss=args.gss,
+            vad=args.vad,
+            max_offset_seconds=args.max_offset_seconds,
+            use_segmented_aligner=args.use_segmented_aligner,
+            no_fix_framerate=args.no_fix_framerate,
+            no_auto_sync=args.no_auto_sync,
+        ),
+        piecewise=args.piecewise,
+        piecewise_window=args.piecewise_window,
     )
 
 
-def _candidate_subtitle_paths(video_path: Path, lang: str) -> list[Path]:
+def _candidate_subtitle_paths(
+    video_path: Path, lang: str, ext: str = SUBTITLE_EXT
+) -> list[Path]:
     stem = video_path.with_suffix("")
-    # Deduplicate while preserving order so case variants don't double-match
-    # on case-insensitive filesystems (e.g. macOS default HFS+).
+    # Deduplicate on the exact path, not a casefolded one: on a case-sensitive
+    # filesystem `show.FIN.srt` is a different file that must still be probed.
+    # On a case-insensitive filesystem the variants resolve to the same file and
+    # discovery returns on the first hit, so the extra probes cost nothing.
     seen: set[str] = set()
     candidates: list[Path] = []
     lang_roots = LANG_ALIASES.get(_normalize_lang(lang), (lang,))
     for lang_root in lang_roots:
         for variant in (lang_root.lower(), lang_root, lang_root.upper()):
-            p = Path(f"{stem}.{variant}.{SUBTITLE_EXT}")
-            key = str(p).casefold()
+            p = Path(f"{stem}.{variant}.{ext}")
+            key = str(p)
             if key not in seen:
                 seen.add(key)
                 candidates.append(p)
     return candidates
 
 
-def _find_subtitle(video_path: Path, lang: str) -> Path | None:
-    for candidate in _candidate_subtitle_paths(video_path, lang):
-        if candidate.exists() and candidate.is_file():
-            return candidate
+def _case_insensitive_index(directory: Path) -> dict[str, Path]:
+    """Map casefolded file name -> real path for one directory.
+
+    Subtitle files arrive from many sources and their language suffix casing is
+    not predictable (`.fin.srt`, `.FIN.srt`, `.Fin.srt`). Matching through this
+    index makes discovery case-insensitive even on a case-sensitive filesystem.
+    """
+    index: dict[str, Path] = {}
+    try:
+        for entry in directory.iterdir():
+            index.setdefault(entry.name.casefold(), entry)
+    except OSError:
+        pass
+    return index
+
+
+def _find_subtitle(
+    video_path: Path, lang: str, fallback_lang: str = DEFAULT_FALLBACK_LANG
+) -> SubtitleCandidate | None:
+    stem = video_path.with_suffix("")
+    index = _case_insensitive_index(video_path.parent)
+
+    # Ordered probes: target .srt, bare .srt, target .sub, then the same
+    # sequence for the fallback language. The bare name is probed once, in the
+    # target-language pass only.
+    probes: list[tuple[Path, str, bool]] = [
+        (path, lang, False)
+        for path in _candidate_subtitle_paths(video_path, lang, SUBTITLE_EXT)
+    ]
+    probes.append((Path(f"{stem}.{SUBTITLE_EXT}"), lang, False))
+    probes.extend(
+        (path, lang, False)
+        for path in _candidate_subtitle_paths(video_path, lang, SUB_EXT)
+    )
+    if _normalize_lang(fallback_lang):
+        for ext in (SUBTITLE_EXT, SUB_EXT):
+            probes.extend(
+                (path, fallback_lang, True)
+                for path in _candidate_subtitle_paths(video_path, fallback_lang, ext)
+            )
+
+    seen: set[str] = set()
+    for path, candidate_lang, is_fallback in probes:
+        key = path.name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+
+        match = index.get(key)
+        if match is None or not match.is_file():
+            continue
+
+        if match.suffix.casefold() == f".{SUB_EXT}":
+            return SubtitleCandidate(
+                subtitle=match.with_suffix(f".{SUBTITLE_EXT}"),
+                convert_from=match,
+                lang=candidate_lang,
+                is_fallback=is_fallback,
+            )
+        return SubtitleCandidate(
+            subtitle=match,
+            convert_from=None,
+            lang=candidate_lang,
+            is_fallback=is_fallback,
+        )
+
     return None
 
 
@@ -271,8 +461,8 @@ def resolve_jobs(
     jobs: list[SsyncJob] = []
     skipped: list[SsyncResult] = []
     for video in videos:
-        subtitle = _find_subtitle(video, options.lang)
-        if subtitle is None:
+        candidate = _find_subtitle(video, options.lang, options.fallback_lang)
+        if candidate is None:
             skipped.append(
                 SsyncResult(
                     video=video,
@@ -289,15 +479,43 @@ def resolve_jobs(
         jobs.append(
             SsyncJob(
                 video=video,
-                subtitle=subtitle,
-                output=_resolve_output_path(subtitle),
+                subtitle=candidate.subtitle,
+                output=_resolve_output_path(candidate.subtitle),
                 lang=options.lang,
                 reference_source=options.reference_source,
+                candidate=candidate,
                 preflight=options.preflight,
+                tuning=options.tuning,
+                piecewise=options.piecewise,
+                piecewise_window=options.piecewise_window,
             )
         )
 
     return jobs, skipped
+
+
+def _convert_sub_to_srt(source: Path, target: Path) -> bool:
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-sub_charenc",
+        "ISO-8859-15",
+        "-i",
+        str(source),
+        str(target),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+    except Exception:
+        return False
+    if not target.exists() or target.stat().st_size == 0:
+        return False
+    with contextlib.suppress(Exception):
+        source.unlink()
+    return True
 
 
 def choose_reference_source(job: SsyncJob, temp_dir: Path) -> SsyncSyncRequest:
@@ -308,7 +526,13 @@ def choose_reference_source(job: SsyncJob, temp_dir: Path) -> SsyncSyncRequest:
             output=job.output,
             preflight=job.preflight,
             force_audio_vad=True,
-            message=f"Synchronizing subtitles for {job.video.name} using audio track as reference",
+            message=(
+                f"Synchronizing subtitles for {job.video.name} using audio "
+                "track as reference"
+                + (" with piecewise drift correction" if job.piecewise else "")
+            ),
+            tuning=job.tuning,
+            piecewise_audio=job.piecewise,
         )
 
     embedded_stream = _pick_reference_subtitle_stream(
@@ -322,6 +546,7 @@ def choose_reference_source(job: SsyncJob, temp_dir: Path) -> SsyncSyncRequest:
             preflight=job.preflight,
             force_audio_vad=True,
             message="No embedded subtitle reference found; using audio track as reference",
+            tuning=job.tuning,
         )
 
     extracted = _extract_embedded_reference_subtitle(
@@ -338,6 +563,7 @@ def choose_reference_source(job: SsyncJob, temp_dir: Path) -> SsyncSyncRequest:
                 "Embedded subtitle stream could not be extracted; "
                 "using audio track as reference"
             ),
+            tuning=job.tuning,
         )
 
     return SsyncSyncRequest(
@@ -350,6 +576,7 @@ def choose_reference_source(job: SsyncJob, temp_dir: Path) -> SsyncSyncRequest:
             f"Synchronizing subtitles for {job.video.name} using embedded subtitle "
             f"stream #{embedded_stream.get('index')} as reference"
         ),
+        tuning=job.tuning,
     )
 
 
@@ -364,10 +591,34 @@ def build_sync_args(request: SsyncSyncRequest) -> argparse.Namespace:
         # ssync owns embedded-reference selection. When a video is the reference,
         # force audio VAD instead of allowing ffsubsync to prefer subtitle streams.
         args.vad = "webrtc"
+
+    tuning = request.tuning
+    # An explicit --vad wins over the forced audio default above.
+    if tuning.vad is not None:
+        args.vad = tuning.vad
+    if tuning.max_offset_seconds is not None:
+        args.max_offset_seconds = tuning.max_offset_seconds
+    if tuning.gss:
+        args.gss = True
+    if tuning.use_segmented_aligner:
+        args.use_segmented_aligner = True
+    if tuning.no_fix_framerate:
+        args.no_fix_framerate = True
+    if tuning.no_auto_sync:
+        args.auto_sync = False
+    if request.piecewise_audio:
+        args.piecewise_audio = True
     return args
 
 
 def _dry_run_job(job: SsyncJob) -> SsyncResult:
+    if job.piecewise:
+        if job.reference_source == "embedded":
+            _print(
+                f"Mode: piecewise, embedded reference (window {job.piecewise_window}ms)"
+            )
+        else:
+            _print("Mode: piecewise, audio reference")
     _print(f"Reference source: {job.reference_source}")
     _print(f"Reference video: {job.video}")
     if job.reference_source == "embedded":
@@ -382,16 +633,101 @@ def _dry_run_job(job: SsyncJob) -> SsyncResult:
             )
         else:
             _print("Embedded subtitle reference: none; would use audio")
+    if job.candidate:
+        if job.candidate.is_fallback:
+            _print(f"Matched fallback subtitle language: {job.candidate.lang}")
+        if job.candidate.convert_from is not None:
+            _print(
+                f"Subtitle conversion: would convert {job.candidate.convert_from.name} "
+                f"to {job.subtitle.name}"
+            )
     _print(f"Input subtitle: {job.subtitle}")
     _print(f"Output subtitle: {job.output}")
     return SsyncResult(video=job.video, job=job, status="dry_run")
 
 
+def _skipped(job: SsyncJob, reason: str) -> SsyncResult:
+    return SsyncResult(
+        video=job.video,
+        job=job,
+        status="skipped",
+        skipped_reason=reason,
+    )
+
+
+def _execute_piecewise_job(job: SsyncJob, temp_dir: Path) -> SsyncResult:
+    from ffsubsync.tools.piecewise_sync import parse_srt, piecewise_sync, write_srt
+
+    stream = _pick_reference_subtitle_stream(
+        _embedded_subtitle_streams(job.video), job.lang
+    )
+    if stream is None:
+        return _skipped(
+            job,
+            f"No embedded subtitle stream in {job.video.name}; piecewise sync "
+            "needs a subtitle reference. Skipping.",
+        )
+
+    reference = _extract_embedded_reference_subtitle(job.video, stream, temp_dir)
+    if reference is None:
+        return _skipped(
+            job,
+            f"Embedded subtitle stream #{stream.get('index')} could not be "
+            "extracted; piecewise sync needs a subtitle reference. Skipping.",
+        )
+
+    message = (
+        f"Piecewise-syncing subtitles for {job.video.name} using embedded "
+        f"subtitle stream #{stream.get('index')} as reference"
+    )
+    _print(message)
+
+    ref_subs, _ = parse_srt(str(reference))
+    input_subs, _ = parse_srt(str(job.subtitle))
+    synced = piecewise_sync(ref_subs, input_subs, job.piecewise_window)
+    write_srt(synced, str(job.output))
+
+    return SsyncResult(
+        video=job.video,
+        job=job,
+        status="synced",
+        return_code=0,
+        message=message,
+    )
+
+
 def execute_job(
     job: SsyncJob,
     executor: Callable[[argparse.Namespace], Mapping[str, Any]],
+    converter: Callable[[Path, Path], bool] = _convert_sub_to_srt,
 ) -> SsyncResult:
+    if job.candidate:
+        if job.candidate.is_fallback:
+            _print(
+                f"Using fallback language subtitle ({job.candidate.lang}): {job.subtitle.name}"
+            )
+        if job.candidate.convert_from is not None:
+            _print(
+                f"Converting {job.candidate.convert_from.name} to {job.subtitle.name} (ISO-8859-15)..."
+            )
+            if not converter(job.candidate.convert_from, job.subtitle):
+                msg = (
+                    f"Failed to convert subtitle {job.candidate.convert_from.name} "
+                    f"to {job.subtitle.name}"
+                )
+                _print(msg)
+                return SsyncResult(
+                    video=job.video,
+                    job=job,
+                    status="failed",
+                    return_code=1,
+                    message=msg,
+                )
+
     with tempfile.TemporaryDirectory(prefix="ffsubsync-ssync-") as temp_name:
+        if job.piecewise and job.reference_source == "embedded":
+            return _execute_piecewise_job(job, Path(temp_name))
+
         request = choose_reference_source(job, Path(temp_name))
         _print(request.message)
         result = executor(build_sync_args(request))
@@ -440,6 +776,8 @@ def main(
 
         job = next(job for job in jobs if job.video == video)
         result = _dry_run_job(job) if options.dry_run else execute_job(job, executor)
+        if result.status == "skipped" and result.skipped_reason:
+            _print(result.skipped_reason)
         if result.return_code != 0:
             exit_code = result.return_code
 

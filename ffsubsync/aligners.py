@@ -116,8 +116,12 @@ class SegmentedAligner(TransformerMixin):
         self.get_score_: bool = False
         self.confidence_: str = "unknown"
         self.vote_ratio_: float = 0.0
+        # (center_seconds, offset_samples, score) per aligned window; retained
+        # for callers that want the drift profile rather than the consensus.
+        self.window_results_: list[tuple[float, int, float]] = []
 
     def fit(self, refstring, substring, get_score: bool = False) -> "SegmentedAligner":
+        self.window_results_ = []
         refstring, substring = [
             list(map(int, s)) if isinstance(s, str) else s
             for s in [refstring, substring]
@@ -143,6 +147,14 @@ class SegmentedAligner(TransformerMixin):
             fft_aligner.fit(refstring, substring, get_score=get_score)
             self.best_offset_ = fft_aligner.best_offset_
             self.best_score_ = fft_aligner.best_score_
+            if fft_aligner.best_offset_ is not None:
+                self.window_results_ = [
+                    (
+                        len(refstring) / (2.0 * self.sample_rate),
+                        fft_aligner.best_offset_,
+                        float(fft_aligner.best_score_ or 0.0),
+                    )
+                ]
             self.confidence_ = "high"
             self.vote_ratio_ = 1.0
             self.get_score_ = get_score
@@ -185,6 +197,13 @@ class SegmentedAligner(TransformerMixin):
 
                 if aligner.best_offset_ is not None and aligner.best_score_ is not None:
                     window_results.append((aligner.best_offset_, aligner.best_score_))
+                    self.window_results_.append(
+                        (
+                            (start_idx + window_size_samples / 2.0) / self.sample_rate,
+                            aligner.best_offset_,
+                            float(aligner.best_score_),
+                        )
+                    )
                     num_windows += 1
 
             except Exception as e:

@@ -13,6 +13,7 @@ ffmpeg or VAD pass is needed.
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 
 import numpy as np
 
@@ -24,6 +25,9 @@ DEFAULT_WINDOW_SIZE_SECONDS = 200.0
 DEFAULT_OVERLAP_SECONDS = 100.0
 DEFAULT_MAX_RESIDUAL_OFFSET_SECONDS = 15.0
 DEFAULT_MIN_SPEECH_SECONDS = 10.0
+# A residual jump bigger than this between neighbouring windows is treated as
+# an edit difference and placed as a step, not interpolated as drift.
+DEFAULT_STEP_THRESHOLD_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -186,3 +190,75 @@ def build_anchors(
         return []
 
     return [Anchor(time=w.center_seconds, offset=w.offset_seconds) for w in kept]
+
+
+def _longest_silence(
+    lo: float, hi: float, cue_spans: Sequence[tuple[float, float]]
+) -> tuple[float, float]:
+    """Return the longest stretch of ``[lo, hi]`` that no cue covers."""
+    best = (lo, lo)
+    cursor = lo
+    for start, end in sorted(cue_spans):
+        if end <= lo or start >= hi:
+            continue
+        if start > cursor and start - cursor > best[1] - best[0]:
+            best = (cursor, start)
+        cursor = max(cursor, end)
+    if hi > cursor and hi - cursor > best[1] - best[0]:
+        best = (cursor, hi)
+    return best
+
+
+def snap_steps_to_gaps(
+    anchors: Sequence[Anchor],
+    cue_spans: Sequence[tuple[float, float]],
+    *,
+    step_threshold_seconds: float = DEFAULT_STEP_THRESHOLD_SECONDS,
+    monotonicity_margin_seconds: float = 0.5,
+) -> list[Anchor]:
+    """Turn large jumps between adjacent anchors into steps at a cue-free gap.
+
+    A residual that jumps by several seconds between two neighbouring windows
+    is an edit difference (a scene cut or trimmed shot), not gradual drift.
+    Interpolating linearly across it would push every cue between the two
+    anchors partway, so none of them lands right. Instead, find the longest
+    silence in the subtitle timeline between the two anchors and move the
+    whole jump there: cues before the silence keep the earlier offset, cues
+    after it take the later one.
+
+    ``cue_spans`` are ``(start, end)`` pairs in the same timeline as the
+    anchors (reference time, after the global shift). A pair is left as a
+    ramp when the silence is too short to absorb a negative jump, because the
+    warp would then reorder cues.
+    """
+    if len(anchors) < 2:
+        return list(anchors)
+
+    refined: list[Anchor] = [anchors[0]]
+    for a, b in pairwise(anchors):
+        jump = b.offset - a.offset
+        if abs(jump) > step_threshold_seconds:
+            gap_start, gap_end = _longest_silence(a.time, b.time, cue_spans)
+            if gap_end - gap_start + jump <= monotonicity_margin_seconds:
+                logger.info(
+                    "piecewise: edit step %+.3fs between %.1fs and %.1fs does "
+                    "not fit the longest silence (%.1f-%.1fs); keeping the ramp",
+                    jump,
+                    a.time,
+                    b.time,
+                    gap_start,
+                    gap_end,
+                )
+            else:
+                logger.info(
+                    "piecewise: edit step %+.3fs placed in the silence %.1f-%.1fs",
+                    jump,
+                    gap_start,
+                    gap_end,
+                )
+                if gap_start > refined[-1].time:
+                    refined.append(Anchor(time=gap_start, offset=a.offset))
+                if gap_end < b.time:
+                    refined.append(Anchor(time=gap_end, offset=b.offset))
+        refined.append(b)
+    return refined

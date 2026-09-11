@@ -12,6 +12,7 @@ from ffsubsync.piecewise import (
     WindowOffset,
     build_anchors,
     compute_window_offsets,
+    snap_steps_to_gaps,
 )
 from ffsubsync.subtitle_transformers import PiecewiseSubtitleShifter
 
@@ -190,6 +191,75 @@ class TestPiecewiseSubtitleShifter:
         out = list(shifter.fit_transform(subs))
 
         assert out[0].start.total_seconds() == 0.0
+
+
+class TestSnapStepsToGaps:
+    # Cues every 3s with a 40s silence between 545s and 585s, like a scene
+    # that one cut of the episode has and the other does not.
+    CUES = [(t, t + 2.0) for t in np.arange(480.0, 544.0, 3.0)] + [
+        (t, t + 2.0) for t in np.arange(585.0, 640.0, 3.0)
+    ]
+
+    def test_places_large_jump_in_longest_silence(self):
+        anchors = [Anchor(500.0, 12.0), Anchor(600.0, 0.0)]
+
+        refined = snap_steps_to_gaps(anchors, self.CUES)
+
+        last_before = max(end for start, end in self.CUES if start < 560)
+        first_after = min(start for start, _ in self.CUES if start > 560)
+        assert refined == [
+            Anchor(500.0, 12.0),
+            Anchor(last_before, 12.0),
+            Anchor(first_after, 0.0),
+            Anchor(600.0, 0.0),
+        ]
+
+    def test_leaves_small_drift_untouched(self):
+        anchors = [Anchor(500.0, 0.3), Anchor(600.0, -0.4), Anchor(700.0, 0.1)]
+
+        assert snap_steps_to_gaps(anchors, self.CUES) == anchors
+
+    def test_interval_without_cues_needs_no_extra_knots(self):
+        anchors = [Anchor(500.0, 12.0), Anchor(600.0, 0.0)]
+
+        assert snap_steps_to_gaps(anchors, []) == anchors
+
+    def test_keeps_ramp_when_silence_cannot_absorb_negative_jump(self):
+        anchors = [Anchor(500.0, 12.0), Anchor(600.0, 0.0)]
+        dense = [(t, t + 2.5) for t in np.arange(400.0, 700.0, 3.0)]
+
+        assert snap_steps_to_gaps(anchors, dense) == anchors
+
+    def test_warp_stays_monotonic(self):
+        anchors = [Anchor(100.0, 0.0), Anchor(500.0, 12.0), Anchor(600.0, 0.0)]
+
+        refined = snap_steps_to_gaps(anchors, self.CUES)
+
+        times = [a.time for a in refined]
+        warped = [a.time + a.offset for a in refined]
+        assert times == sorted(times)
+        assert warped == sorted(warped)
+
+    def test_cues_on_each_side_get_one_offset(self):
+        anchors = snap_steps_to_gaps(
+            [Anchor(500.0, 12.0), Anchor(600.0, 0.0)], self.CUES
+        )
+        subs = GenericSubtitlesFile(
+            [
+                GenericSubtitle(timedelta(seconds=s), timedelta(seconds=e), None)
+                for s, e in self.CUES
+            ],
+            sub_format="srt",
+            encoding="utf-8",
+        )
+        shifter = PiecewiseSubtitleShifter([(a.time, a.offset) for a in anchors])
+
+        out = list(shifter.fit_transform(subs))
+
+        for (start, _), sub in zip(self.CUES, out, strict=True):
+            shift = sub.start.total_seconds() - start
+            expected = 12.0 if start < 560 else 0.0
+            assert abs(shift - expected) < 1e-6
 
 
 class TestSegmentedAlignerWindowResults:

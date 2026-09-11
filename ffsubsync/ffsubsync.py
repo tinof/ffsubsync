@@ -37,6 +37,7 @@ from ffsubsync.piecewise import (
     Anchor,
     build_anchors,
     compute_window_offsets,
+    snap_steps_to_gaps,
 )
 from ffsubsync.preflight import check_already_synced
 from ffsubsync.sklearn_shim import Pipeline, TransformerMixin
@@ -260,6 +261,18 @@ def _compute_piecewise_anchors(
             overlap_seconds=args.piecewise_overlap_seconds,
         )
         anchors = build_anchors(window_offsets)
+        if anchors:
+            # Anchors live in reference time, so move the cues by the global
+            # offset before looking for the silence an edit step can sit in.
+            shift_seconds = offset_samples / float(SAMPLE_RATE)
+            cue_spans = [
+                (
+                    sub.start.total_seconds() + shift_seconds,
+                    sub.end.total_seconds() + shift_seconds,
+                )
+                for sub in best_srt_pipe.named_steps["scale"].subs_
+            ]
+            anchors = snap_steps_to_gaps(anchors, cue_spans)
     except Exception:
         logger.exception("piecewise drift estimation failed; keeping global sync")
         return []

@@ -180,3 +180,40 @@ def test_pgs_flag_rejects_non_video_reference():
     args = _parse(["ref.srt", "-i", "in.srt", "--pgs-ref-stream"])
     with pytest.raises(ValueError, match="needs a video"):
         ffsubsync.validate_args(args)
+
+
+def test_container_start_time_is_subtracted():
+    # MPEG-TS starts at a non-zero timestamp; every other reference counts from it.
+    with patch(BIN, return_value="ffprobe"), patch(PROBE) as probe:
+        probe.return_value = {
+            "format": {"start_time": "1.400000"},
+            "packets": [_packet(11.4, None, 900), _packet(12.4, None, 30)],
+        }
+        result = _get_pgs_timings_via_ffprobe("test.ts", "0:s:0")
+    assert result is not None
+    assert result[0] == pytest.approx((10.0, 11.0))
+
+
+def test_try_sync_with_pgs_reference_end_to_end(tmp_path):
+    # Regression: PGSSpeechTransformer.num_frames is None, and compute_alignment
+    # used to call float(None) on it, so every strategy failed.
+    srtin = tmp_path / "in.srt"
+    srtin.write_text(
+        "1\n00:00:05,000 --> 00:00:06,000\nhi\n\n"
+        "2\n00:00:09,000 --> 00:00:10,500\nyo\n\n"
+        "3\n00:00:15,000 --> 00:00:15,700\nok\n"
+    )
+    srtout = tmp_path / "out.srt"
+    args = _parse(["m.mkv", "-i", str(srtin), "-o", str(srtout), "--pgs-ref-stream"])
+    with (
+        patch("ffsubsync.speech_transformers.find_pgs_stream", return_value="0:s:0"),
+        patch(
+            "ffsubsync.speech_transformers._get_pgs_timings_via_ffprobe",
+            return_value=[(3.0, 4.0), (7.0, 8.5), (13.0, 13.7)],
+        ),
+    ):
+        pipe = ffsubsync.make_reference_pipe(args).fit("m.mkv")
+    result = {}
+
+    assert ffsubsync.try_sync(args, pipe, result) is True
+    assert result["offset_seconds"] == pytest.approx(-2.0)

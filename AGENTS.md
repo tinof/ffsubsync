@@ -48,8 +48,12 @@ setuptools and Versioneer.
   extracted to `.srt`; a PGS stream is not extracted: ssync passes it to the
   engine as `--pgs-ref-stream 0:<index>`, and `PGSSpeechTransformer` reads the
   caption timings from the container packets with ffprobe (caption end = next
-  "clear" packet when the muxer stores no duration). Falls back to audio if
-  there is no usable stream or text extraction fails.
+  "clear" packet when the muxer stores no duration; the container start time is
+  subtracted). PGS is only offered for `.mkv` files, because in a Blu-ray
+  transport stream each PGS segment may be its own packet. Falls back to audio
+  if there is no usable stream, text extraction fails, or the PGS reference
+  raises. A job is reported as failed when the engine's result has
+  `sync_was_successful: False` (the engine's own exit code stays 0).
 - `--dry-run` reports resolved jobs and reference policy without running
   extraction or synchronization.
 - Advanced tuning flags are forwarded to the sync engine for when the default

@@ -753,15 +753,23 @@ def _get_pgs_timings_via_ffprobe(
             cmd=ffmpeg_bin_path("ffprobe", ffmpeg_resources_path=ffmpeg_path),
             show_packets=None,
             select_streams=probe_stream,
-            show_entries="packet=pts_time,duration_time,size",
+            show_entries="packet=pts_time,duration_time,size:format=start_time",
         )
     except Exception:
         return None
 
+    # pts_time is the raw container timestamp. ffmpeg's audio extraction (and so
+    # every other reference) counts from the container start time, which is
+    # about 0 for MKV but not for MPEG-TS, so subtract it.
+    try:
+        container_start = float(probe_data.get("format", {}).get("start_time", 0.0))
+    except (TypeError, ValueError):
+        container_start = 0.0
+
     packets: list[tuple[float, float | None, int]] = []
     for packet in probe_data.get("packets", []):
         try:
-            pts_time = float(packet["pts_time"])
+            pts_time = float(packet["pts_time"]) - container_start
             size = int(packet["size"])
         except (KeyError, TypeError, ValueError):
             continue

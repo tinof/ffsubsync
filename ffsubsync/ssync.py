@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -443,6 +443,19 @@ def _is_pgs_stream(stream: dict[str, object]) -> bool:
     return str(stream.get("codec_name", "")).lower() == PGS_CODEC
 
 
+def _embedded_reference_streams(video_path: Path) -> list[dict[str, object]]:
+    """Subtitle streams usable as a reference for this video.
+
+    PGS timings are read as one packet per caption, which holds for MKV. In a
+    Blu-ray transport stream each PGS segment may be its own packet, so PGS
+    streams are only offered for MKV files.
+    """
+    streams = _embedded_subtitle_streams(video_path)
+    if video_path.suffix.lower() == ".mkv":
+        return streams
+    return [s for s in streams if not _is_pgs_stream(s)]
+
+
 def _pick_reference_subtitle_stream(
     streams: list[dict[str, object]], target_lang: str
 ) -> dict[str, object] | None:
@@ -597,7 +610,7 @@ def choose_reference_source(job: SsyncJob, temp_dir: Path) -> SsyncSyncRequest:
         )
 
     embedded_stream = _pick_reference_subtitle_stream(
-        _embedded_subtitle_streams(job.video), job.lang
+        _embedded_reference_streams(job.video), job.lang
     )
     if embedded_stream is None:
         return SsyncSyncRequest(
@@ -731,7 +744,7 @@ def _dry_run_job(job: SsyncJob) -> SsyncResult:
     _print(f"Reference video: {job.video}")
     if job.reference_source == "embedded":
         embedded_stream = _pick_reference_subtitle_stream(
-            _embedded_subtitle_streams(job.video), job.lang
+            _embedded_reference_streams(job.video), job.lang
         )
         if embedded_stream is not None:
             _print(
@@ -835,7 +848,7 @@ def execute_job(
     with tempfile.TemporaryDirectory(prefix="ffsubsync-ssync-") as temp_name:
         if job.piecewise and job.reference_source == "embedded":
             stream = _pick_reference_subtitle_stream(
-                _embedded_subtitle_streams(job.video), job.lang
+                _embedded_reference_streams(job.video), job.lang
             )
             # In drift mode a text stream is warped with tools/piecewise_sync. A PGS
             # stream has no text, and split mode is an engine feature, so both go
@@ -848,7 +861,25 @@ def execute_job(
 
         request = choose_reference_source(job, Path(temp_name))
         _print(request.message)
-        result = executor(build_sync_args(request))
+        try:
+            result = executor(build_sync_args(request))
+        except Exception as e:
+            if request.pgs_stream is None:
+                raise
+            # An unusable PGS track (no packets, ffprobe failure) must not abort
+            # the batch: use the audio track instead, like a failed text extraction.
+            request = replace(
+                request,
+                reference=job.video,
+                force_audio_vad=True,
+                pgs_stream=None,
+                message=(
+                    f"PGS subtitle reference failed ({e}); using audio track "
+                    "as reference"
+                ),
+            )
+            _print(request.message)
+            result = executor(build_sync_args(request))
 
     kept_original_reason = result.get("kept_original_reason")
     if kept_original_reason:
@@ -864,6 +895,10 @@ def execute_job(
         )
 
     retval = int(result.get("retval", 1))
+    # The engine's exit code stays 0 when no alignment strategy succeeded
+    # (upstream behaviour), so also check the sync result itself.
+    if retval == 0 and result.get("sync_was_successful") is False:
+        retval = 1
     return SsyncResult(
         video=job.video,
         job=job,

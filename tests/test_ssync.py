@@ -858,6 +858,48 @@ class TestPgsReference:
         assert captured_args[0].pgs_ref_stream == "0:5"
         assert captured_args[0].piecewise_audio is True
 
+    def test_unusable_pgs_track_falls_back_to_audio(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(
+            "ffsubsync.ssync._embedded_subtitle_streams", lambda _: PGS_STREAMS
+        )
+        captured_args = []
+
+        def executor(args):
+            captured_args.append(args)
+            if args.pgs_ref_stream is not None:
+                raise ValueError("No usable PGS caption timings")
+            return {"retval": 0, "sync_was_successful": True}
+
+        result = execute_job(self._job(tmp_path), executor)
+
+        assert result.status == "synced"
+        assert captured_args[-1].pgs_ref_stream is None
+        assert captured_args[-1].vad == "webrtc"
+        assert "PGS subtitle reference failed" in capsys.readouterr().err
+
+    def test_pgs_is_not_offered_outside_mkv(self, tmp_path, monkeypatch):
+        video = tmp_path / "Show - S01E01.m2ts"
+        video.touch()
+        subtitle = tmp_path / "Show - S01E01.fin.srt"
+        subtitle.write_text(SRT_SAMPLE)
+        monkeypatch.setattr(
+            "ffsubsync.ssync._embedded_subtitle_streams", lambda _: PGS_STREAMS
+        )
+        job = SsyncJob(
+            video=video,
+            subtitle=subtitle,
+            output=subtitle,
+            lang="fin",
+            reference_source="embedded",
+        )
+
+        request = choose_reference_source(job, tmp_path)
+
+        assert request.pgs_stream is None
+        assert request.force_audio_vad is True
+
     def test_dry_run_shows_codec(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setattr(
             "ffsubsync.ssync._embedded_subtitle_streams", lambda _: PGS_STREAMS
@@ -922,6 +964,15 @@ class TestQualityGate:
 
         def executor(_args):
             return {"retval": 1, "kept_original_reason": "|offset| 90.0s > 60.0s"}
+
+        assert main([str(video)], executor=executor) == 1
+
+    def test_unsuccessful_sync_is_reported_as_failed(self, tmp_path):
+        video, _ = _make_video_and_subtitle(tmp_path)
+
+        def executor(_args):
+            # What run() returns when no alignment strategy succeeded.
+            return {"retval": 0, "sync_was_successful": False}
 
         assert main([str(video)], executor=executor) == 1
 

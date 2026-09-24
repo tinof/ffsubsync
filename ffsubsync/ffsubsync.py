@@ -394,7 +394,8 @@ def compute_alignment(
     if (
         not skip_infer_framerate_ratio
         and reference_pipe is not None
-        and hasattr(reference_pipe[-1], "num_frames")
+        # None (e.g. a PGS reference) means the extent says nothing about framerate.
+        and getattr(reference_pipe[-1], "num_frames", None) is not None
     ):
         inferred_framerate_ratio_from_length = (
             float(reference_pipe[-1].num_frames)
@@ -491,6 +492,9 @@ def try_sync(
     if not args.srtin:
         args.srtin = [None]
     for srtin in args.srtin:
+        # Keys that describe one input file must not leak into the next one.
+        for key in ("kept_original_reason", "split_segments", "piecewise_anchors"):
+            result.pop(key, None)
         try:
             skip_sync = args.skip_sync or reference_pipe is None
             srtout = srtin if args.overwrite_input else args.srtout

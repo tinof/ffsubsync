@@ -237,3 +237,33 @@ def test_cli_parses_quality_flags():
 def test_ffs_cli_gate_is_off_by_default():
     args = ffsubsync.make_parser().parse_args(["movie.mkv"])
     assert args.skip_sync_on_low_quality is False
+
+
+def test_result_keys_do_not_leak_between_input_files(tmp_path, monkeypatch):
+    bad = tmp_path / "a.srt"
+    good = tmp_path / "b.srt"
+    bad.write_text(SRT)
+    good.write_text(SRT)
+    args = ffsubsync.make_parser().parse_args(
+        ["ref.mkv", "-i", str(bad), str(good), "--overwrite-input"]
+    )
+    args.skip_infer_framerate_ratio = True
+    args.auto_sync = False
+    args.skip_sync_on_low_quality = True
+    scores = iter([-3.0, 500.0])
+
+    class _Fake:
+        def __init__(self, *a, **k):
+            pass
+
+        def fit_transform(self, refstring, subpipes):
+            return (next(scores), 5 * SAMPLE_RATE), subpipes[0]
+
+    monkeypatch.setattr(ffsubsync, "MaxScoreAligner", _Fake)
+    reference_pipe = types.SimpleNamespace(transform=lambda _: np.zeros(10))
+    result = {"retval": 0}
+    ffsubsync.try_sync(args, reference_pipe, result)
+
+    assert "kept_original_reason" not in result  # b.srt synced fine
+    assert _first_start_seconds(bad) == pytest.approx(10.0)
+    assert _first_start_seconds(good) == pytest.approx(15.0)

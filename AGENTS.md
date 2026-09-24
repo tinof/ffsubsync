@@ -61,7 +61,9 @@ setuptools and Versioneer.
   engine's `--skip-sync-on-low-quality`. When `assess_alignment_quality()` in
   `ffsubsync.py` returns reasons (negative score, offset above
   `--quality-max-offset-seconds`, default 60 s and raised to match an explicit
-  `--max-offset-seconds`, or framerate scale deviation above 0.1), `try_sync()`
+  `--max-offset-seconds`, framerate scale deviation above 0.1, or a scale that
+  is not 1.0 or a known ratio within `FRAMERATE_SNAP_TOLERANCE`, via
+  `aligners.nearest_known_framerate_ratio()`), `try_sync()`
   writes the original subtitle, sets `result["kept_original_reason"]`, and skips
   piecewise. ssync reports `kept_original` with exit code 1.
   `--no-quality-gate` disables it. The text-embedded piecewise path

@@ -55,8 +55,20 @@ def test_default_offset_limit_allows_offsets_up_to_a_minute():
 
 def test_default_framerate_threshold_allows_all_real_corrections():
     # The largest known correction is 25/23.976 ~= 1.0427.
-    for scale in (25.0 / 24.0, 25.0 / 23.976, 24.0 / 25.0, 1.05, 0.95):
+    for scale in (1.0, 24.0 / 23.976, 25.0 / 24.0, 25.0 / 23.976, 24.0 / 25.0):
         assert assess_alignment_quality(500.0, 3.0, scale, **_THRESHOLDS) == []
+
+
+def test_scale_within_snap_tolerance_of_a_known_ratio_is_accepted():
+    assert assess_alignment_quality(500.0, 3.0, 1.0417 * 1.004, **_THRESHOLDS) == []
+
+
+@pytest.mark.parametrize("scale", [0.915, 0.947, 0.975, 1.024, 1.033, 1.053])
+def test_off_grid_scale_is_rejected(scale):
+    # These are the scales wrong-episode subtitles got from GSS on real media.
+    reasons = assess_alignment_quality(500.0, 3.0, scale, **_THRESHOLDS)
+    assert len(reasons) == 1
+    assert "not a known framerate ratio" in reasons[0]
 
 
 def test_tightened_framerate_threshold_rejects_correction():
@@ -70,6 +82,12 @@ def test_tightened_framerate_threshold_rejects_correction():
     )
     assert len(reasons) == 1
     assert "framerate" in reasons[0]
+
+
+def test_large_deviation_reports_one_framerate_reason():
+    reasons = assess_alignment_quality(500.0, 3.0, 1.5, **_THRESHOLDS)
+    assert len(reasons) == 1
+    assert "deviation" in reasons[0]
 
 
 def test_quality_reports_multiple_reasons():

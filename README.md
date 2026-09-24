@@ -45,7 +45,7 @@ ssync --dry-run "Episode.mkv"
 
 ### Low-Quality Safety Net — Never Overwrite a Good Subtitle With a Bad Sync
 
-`ssync` writes in place, so a wrong sync used to replace a working subtitle. The engine now checks every alignment before writing it: a negative score (the best match is anti-correlated), an offset larger than 60 s, or a framerate scale more than 0.1 away from 1.0 counts as untrustworthy. `ssync` then keeps the original subtitle, prints `Kept original subtitle for <video>: <reason>`, and exits with code 1 for that video. Piecewise correction never runs on a rejected sync.
+`ssync` writes in place, so a wrong sync used to replace a working subtitle. The engine now checks every alignment before writing it: a negative score (the best match is anti-correlated), an offset larger than 60 s, a framerate scale more than 0.1 away from 1.0, or a scale that is not 1.0 or a known framerate ratio counts as untrustworthy. The last check matters most in practice: syncing seven episodes against the Finnish subtitles of other episodes of the same series, 7 of 18 wrong pairs got such an off-grid scale, and no correct pair did. A wrong subtitle with a plausible scale can still pass, so the gate catches clearly broken syncs, not every wrong one. `ssync` then keeps the original subtitle, prints `Kept original subtitle for <video>: <reason>`, and exits with code 1 for that video. Piecewise correction never runs on a rejected sync.
 
 The gate is on by default in `ssync` (`--no-quality-gate` turns it off) and opt-in in the low-level CLI (from upstream 0.5.0):
 

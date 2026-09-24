@@ -22,6 +22,12 @@ _KNOWN_FRAMERATE_RATIOS: list[float] = (
 )
 
 
+def nearest_known_framerate_ratio(ratio: float) -> tuple[float, float]:
+    """Return the closest physical framerate ratio and its relative error."""
+    nearest = min(_KNOWN_FRAMERATE_RATIOS, key=lambda c: abs(ratio - c) / c)
+    return nearest, abs(ratio - nearest) / nearest
+
+
 class FailedToFindAlignmentException(Exception):
     pass
 
@@ -358,8 +364,7 @@ class MaxScoreAligner(TransformerMixin):
 
         # Discard ratios that are not near any known framerate pair.
         for score, subpipe, ratio in gss_candidates:
-            nearest = min(_KNOWN_FRAMERATE_RATIOS, key=lambda c: abs(ratio - c) / c)
-            rel_err = abs(ratio - nearest) / nearest
+            nearest, rel_err = nearest_known_framerate_ratio(ratio)
             if rel_err > FRAMERATE_SNAP_TOLERANCE:
                 if (
                     best_baseline_score is not None

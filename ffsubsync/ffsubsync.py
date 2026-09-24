@@ -16,6 +16,7 @@ from ffsubsync.aligners import (
     FFTAligner,
     MaxScoreAligner,
     SegmentedAligner,
+    nearest_known_framerate_ratio,
 )
 from ffsubsync.constants import (
     DEFAULT_APPLY_OFFSET_SECONDS,
@@ -30,6 +31,7 @@ from ffsubsync.constants import (
     DEFAULT_START_SECONDS,
     DEFAULT_VAD,
     FRAMERATE_RATIOS,
+    FRAMERATE_SNAP_TOLERANCE,
     SAMPLE_RATE,
     SUBTITLE_EXTENSIONS,
 )
@@ -377,6 +379,12 @@ def assess_alignment_quality(
     applying a probably-wrong sync. A negative score means the best alignment is
     anti-correlated; an implausibly large offset or framerate scale suggests a
     spurious match.
+
+    A scale that is not 1.0 or a known framerate ratio (the GSS snap tolerance) is
+    also rejected. The GSS search accepts such a scale when it scores 15% better
+    than every fixed ratio, but against real media this happened for 7 of 18
+    wrong-episode subtitles and for none of 7 correct ones: on unrelated content
+    the score landscape is noise, and some random scale always wins.
     """
     reasons: list[str] = []
     if best_score < min_score:
@@ -391,6 +399,13 @@ def assess_alignment_quality(
             f"framerate deviation {framerate_deviation:.3f} > "
             f"{max_framerate_deviation:.3f}"
         )
+    else:
+        nearest, rel_err = nearest_known_framerate_ratio(scale_factor)
+        if rel_err > FRAMERATE_SNAP_TOLERANCE:
+            reasons.append(
+                f"framerate scale {scale_factor:.4f} is not a known framerate "
+                f"ratio (nearest {nearest:.4f})"
+            )
     return reasons
 
 

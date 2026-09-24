@@ -60,6 +60,15 @@ class FFTAligner(TransformerMixin):
         refstring, substring = (
             2 * np.array(s).astype(float) - 1 for s in [refstring, substring]
         )
+        if len(refstring) == 0 or len(substring) == 0:
+            # Empty speech on either side has no meaningful alignment. It would
+            # otherwise give a garbage offset, or crash math.log when both are empty.
+            raise FailedToFindAlignmentException(
+                "cannot align empty speech data "
+                f"(reference length={len(refstring)}, "
+                f"subtitle length={len(substring)}); "
+                "the reference or subtitles may contain no detectable speech"
+            )
         total_bits = math.log(len(substring) + len(refstring), 2)
         total_length = int(2 ** math.ceil(total_bits))
         extra_zeros = total_length - len(substring) - len(refstring)

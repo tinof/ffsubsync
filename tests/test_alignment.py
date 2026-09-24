@@ -1,6 +1,10 @@
 import pytest
 
-from ffsubsync.aligners import FFTAligner, MaxScoreAligner
+from ffsubsync.aligners import (
+    FailedToFindAlignmentException,
+    FFTAligner,
+    MaxScoreAligner,
+)
 
 
 @pytest.mark.parametrize(
@@ -11,3 +15,9 @@ def test_fft_alignment(s1, s2, true_offset):
     assert FFTAligner().fit_transform(s2, s1) == true_offset
     assert MaxScoreAligner(FFTAligner).fit_transform(s2, s1)[0][1] == true_offset
     assert MaxScoreAligner(FFTAligner()).fit_transform(s2, s1)[0][1] == true_offset
+
+
+@pytest.mark.parametrize("ref, sub", [("", "1001"), ("1001", ""), ("", "")])
+def test_fft_alignment_rejects_empty_speech(ref, sub):
+    with pytest.raises(FailedToFindAlignmentException, match="empty speech"):
+        FFTAligner().fit(ref, sub)

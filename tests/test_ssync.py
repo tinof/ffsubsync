@@ -424,6 +424,33 @@ class TestEmbeddedReferenceSubtitleSelection:
         assert result is not None
         assert result["index"] == 2
 
+    def test_skips_bitmap_stream_for_text_stream(self):
+        streams = [
+            {
+                "index": 2,
+                "codec_name": "hdmv_pgs_subtitle",
+                "tags": {"language": "eng"},
+            },
+            {"index": 3, "codec_name": "subrip", "tags": {"language": "swe"}},
+        ]
+
+        result = _pick_reference_subtitle_stream(streams, "fin")
+
+        assert result is not None
+        assert result["index"] == 3
+
+    def test_returns_none_when_only_bitmap_streams(self):
+        streams = [
+            {
+                "index": 2,
+                "codec_name": "hdmv_pgs_subtitle",
+                "tags": {"language": "eng"},
+            },
+            {"index": 3, "codec_name": "dvd_subtitle", "tags": {"language": "swe"}},
+        ]
+
+        assert _pick_reference_subtitle_stream(streams, "fin") is None
+
     def test_stream_language_handles_missing_tags(self):
         assert _stream_language({"index": 2}) == ""
 

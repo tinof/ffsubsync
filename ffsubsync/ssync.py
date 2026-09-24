@@ -25,6 +25,11 @@ VAD_CHOICES = (
     "whisper",
 )
 PREFERRED_REFERENCE_LANGS = ("eng", "en")
+# Image-based subtitle codecs. ffmpeg cannot convert them to SRT, so they cannot
+# be extracted as a text reference.
+BITMAP_SUBTITLE_CODECS = frozenset(
+    {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "dvb_teletext", "xsub"}
+)
 LANG_ALIASES = {
     "fin": ("fin", "fi"),
     "fi": ("fi", "fin"),
@@ -391,9 +396,14 @@ def _stream_language(stream: dict[str, object]) -> str:
     return _normalize_lang(str(language))
 
 
+def _is_text_subtitle_stream(stream: dict[str, object]) -> bool:
+    return str(stream.get("codec_name", "")).lower() not in BITMAP_SUBTITLE_CODECS
+
+
 def _pick_reference_subtitle_stream(
     streams: list[dict[str, object]], target_lang: str
 ) -> dict[str, object] | None:
+    streams = [s for s in streams if _is_text_subtitle_stream(s)]
     if not streams:
         return None
 

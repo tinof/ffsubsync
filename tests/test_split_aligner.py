@@ -118,6 +118,19 @@ def test_non_dialogue_cue_follows_its_neighbours():
     assert offsets[1] in (offsets[0], offsets[2])
 
 
+def test_probability_reference_is_thresholded():
+    # Regression: TEN-VAD gives probabilities. With "> 0" every silence frame at
+    # 0.01 counted as speech and correctly placed cues were moved.
+    reference = np.full(40 * SAMPLE_RATE, 0.01)
+    for a, b in [(10, 11), (20, 22), (30, 31.5)]:
+        reference[round(a * SAMPLE_RATE) : round(b * SAMPLE_RATE)] = 0.99
+    cues = [_cue(10, 11), _cue(20, 22), _cue(30, 31.5)]
+    offsets = _align(
+        reference, cues, split_penalty=30 * SAMPLE_RATE, max_offset_seconds=5
+    )
+    assert offsets == [0, 0, 0]
+
+
 # ---- fork: residual search -------------------------------------------------
 
 

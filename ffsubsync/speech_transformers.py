@@ -598,7 +598,7 @@ _PAIRED_NESTER: dict[str, str] = {
     "[": "]",
     "（": "）",  # noqa: RUF001  full-width / CJK brackets, common outside English
     "【": "】",
-    "「": "」",
+    # Not 「」: in Japanese it is the ordinary quotation mark around dialogue.
 }
 
 # Markup tags (e.g. <i>, </i>, <font ...>) carry no speech. Stripping them before

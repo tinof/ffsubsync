@@ -267,3 +267,72 @@ def test_result_keys_do_not_leak_between_input_files(tmp_path, monkeypatch):
     assert "kept_original_reason" not in result  # b.srt synced fine
     assert _first_start_seconds(bad) == pytest.approx(10.0)
     assert _first_start_seconds(good) == pytest.approx(15.0)
+
+
+LONG_CUE_SRT = """1
+00:00:10,000 --> 00:00:40,000
+A long cue the parser caps at 10 s
+
+2
+00:01:00,000 --> 00:01:01,000
+World
+"""
+
+
+def test_kept_original_is_byte_identical(tmp_path, monkeypatch):
+    # Regression: the gate used to write the parsed cues, which the parser had
+    # already capped at --max-subtitle-seconds, so a 30 s cue came back as 10 s.
+    srtin = tmp_path / "in.srt"
+    srtin.write_text(LONG_CUE_SRT)
+    srtout = tmp_path / "out.srt"
+    args = ffsubsync.make_parser().parse_args(
+        ["ref.mkv", "-i", str(srtin), "-o", str(srtout)]
+    )
+    args.skip_infer_framerate_ratio = True
+    args.auto_sync = False
+    args.skip_sync_on_low_quality = True
+    monkeypatch.setattr(ffsubsync, "MaxScoreAligner", _fake_aligner(-3.0, 500))
+    reference_pipe = types.SimpleNamespace(transform=lambda _: np.zeros(10))
+    result = {"retval": 0}
+
+    assert ffsubsync.try_sync(args, reference_pipe, result) is False
+    assert srtout.read_bytes() == srtin.read_bytes()
+
+
+def test_kept_original_in_place_leaves_file_untouched(tmp_path, monkeypatch):
+    srtin = tmp_path / "in.srt"
+    srtin.write_text(LONG_CUE_SRT)
+    before = srtin.read_bytes()
+    args = ffsubsync.make_parser().parse_args(
+        ["ref.mkv", "-i", str(srtin), "--overwrite-input"]
+    )
+    args.skip_infer_framerate_ratio = True
+    args.auto_sync = False
+    args.skip_sync_on_low_quality = True
+    monkeypatch.setattr(ffsubsync, "MaxScoreAligner", _fake_aligner(-3.0, 500))
+    reference_pipe = types.SimpleNamespace(transform=lambda _: np.zeros(10))
+
+    ffsubsync.try_sync(args, reference_pipe, {"retval": 0})
+
+    assert srtin.read_bytes() == before
+
+
+def test_kept_original_is_reencoded_when_asked(tmp_path, monkeypatch):
+    # Plain ffs defaults to --output-encoding utf-8; a Finnish ISO-8859-15 input
+    # keeps its text and timings but is written as UTF-8.
+    text = "1\n00:00:10,000 --> 00:00:40,000\nHyvää päivää, äiti\n"
+    srtin = tmp_path / "in.srt"
+    srtin.write_bytes(text.encode("iso-8859-15"))
+    srtout = tmp_path / "out.srt"
+    args = ffsubsync.make_parser().parse_args(
+        ["ref.mkv", "-i", str(srtin), "-o", str(srtout), "--encoding", "iso-8859-15"]
+    )
+    args.skip_infer_framerate_ratio = True
+    args.auto_sync = False
+    args.skip_sync_on_low_quality = True
+    monkeypatch.setattr(ffsubsync, "MaxScoreAligner", _fake_aligner(-3.0, 500))
+    reference_pipe = types.SimpleNamespace(transform=lambda _: np.zeros(10))
+
+    ffsubsync.try_sync(args, reference_pipe, {"retval": 0})
+
+    assert srtout.read_bytes() == text.encode("utf-8")

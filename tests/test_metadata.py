@@ -17,7 +17,6 @@ from ffsubsync.speech_transformers import SubtitleSpeechTransformer, _is_metadat
         "{laughter}",
         "（音乐）",  # noqa: RUF001  full-width brackets
         "【掌声】",
-        "「効果音」",
         "♪",
         "♪♪",
         "♪ ♫ ♬",
@@ -42,6 +41,7 @@ def test_is_metadata_detects_non_dialogue(content):
         "♪ We are the champions ♪",  # lyrics with words are kept
         "[door creaks] and he walks in",  # bracketed aside + real dialogue
         "(5 > 3) is true",
+        "「こんにちは」",  # Japanese quotation marks wrap dialogue
     ],
 )
 def test_is_metadata_keeps_dialogue(content):

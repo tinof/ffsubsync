@@ -480,6 +480,42 @@ def assess_alignment_quality(
     return reasons
 
 
+def _write_original_subtitles(
+    args: argparse.Namespace,
+    srtin: str | None,
+    srtout: str | None,
+    best_srt_pipe: Pipeline,
+) -> None:
+    """Write the input subtitles unchanged to ``srtout`` (a rejected sync).
+
+    The raw input is used, not the parsed cues: the parser has already
+    preprocessed them (long cues capped at --max-subtitle-seconds), so writing
+    them back would alter the file. Only the text encoding may change, when
+    --output-encoding asks for a different one.
+    """
+    original_subs = best_srt_pipe.named_steps["parse"].subs_
+    if srtin is None:
+        # stdin cannot be read again; the parsed cues are all that is left.
+        out_subs = original_subs.clone_props_for_subs(list(original_subs))
+        out_subs.set_encoding(args.output_encoding).write_file(srtout)
+        return
+    with open(srtin, "rb") as f:
+        raw = f.read()
+    data = raw
+    in_encoding = original_subs.encoding
+    out_encoding = args.output_encoding
+    if out_encoding not in ("same", in_encoding):
+        data = raw.decode(in_encoding).encode(out_encoding)
+    if srtout is None:
+        sys.stdout.buffer.write(data)
+        return
+    in_place = os.path.exists(srtout) and os.path.samefile(srtin, srtout)
+    if in_place and data == raw:
+        return  # nothing to change; leave the file (and its mtime) alone
+    with open(srtout, "wb") as f:
+        f.write(data)
+
+
 def try_sync(
     args: argparse.Namespace, reference_pipe: Pipeline | None, result: dict[str, Any]
 ) -> bool:
@@ -672,16 +708,14 @@ def try_sync(
                 )
                 sync_was_successful = False
                 result["kept_original_reason"] = reason
-                # Write the original (unscaled, unshifted) subtitles. This runs
-                # before the piecewise step, so a rejected sync is never warped.
-                original_subs = best_srt_pipe.named_steps["parse"].subs_
-                out_subs = original_subs.clone_props_for_subs(list(original_subs))
-                if args.output_encoding != "same":
-                    out_subs = out_subs.set_encoding(args.output_encoding)
+                # Keep the original subtitles. This runs before the piecewise step,
+                # so a rejected sync is never warped. Copy the input file verbatim:
+                # the parsed cues are already preprocessed (e.g. long cues capped
+                # at --max-subtitle-seconds), so writing them would alter the file.
                 logger.info(
                     "writing original (unsynced) output to %s", srtout or "stdout"
                 )
-                out_subs.write_file(srtout)
+                _write_original_subtitles(args, srtin, srtout, best_srt_pipe)
                 continue
             output_steps: list[tuple[str, TransformerMixin]] = [
                 ("shift", SubtitleShifter(offset_seconds))

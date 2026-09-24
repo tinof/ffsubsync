@@ -87,6 +87,10 @@ class GenericSubtitlesFile:
         self._info: dict[str, str] | None = kwargs.pop("info", None)
         self._fps: float | None = kwargs.pop("fps", None)
 
+    @property
+    def encoding(self) -> str:
+        return self._encoding
+
     def set_encoding(self, encoding: str) -> "GenericSubtitlesFile":
         if encoding != "same":
             self._encoding = encoding

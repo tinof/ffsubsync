@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -97,7 +97,7 @@ class SsyncOptions:
     dry_run: bool = False
     preflight: bool = False
     reference_source: ReferenceSource = "audio"
-    tuning: SyncTuning = SyncTuning()
+    tuning: SyncTuning = field(default_factory=SyncTuning)
     piecewise: bool = False
     piecewise_window: int = DEFAULT_PIECEWISE_WINDOW_MS
 
@@ -111,7 +111,7 @@ class SsyncJob:
     reference_source: ReferenceSource
     candidate: SubtitleCandidate | None = None
     preflight: bool = False
-    tuning: SyncTuning = SyncTuning()
+    tuning: SyncTuning = field(default_factory=SyncTuning)
     piecewise: bool = False
     piecewise_window: int = DEFAULT_PIECEWISE_WINDOW_MS
 
@@ -124,7 +124,7 @@ class SsyncSyncRequest:
     preflight: bool
     force_audio_vad: bool
     message: str
-    tuning: SyncTuning = SyncTuning()
+    tuning: SyncTuning = field(default_factory=SyncTuning)
     piecewise_audio: bool = False
     # ffmpeg specifier of an embedded PGS track to use as the reference.
     pgs_stream: str | None = None

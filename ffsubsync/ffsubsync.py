@@ -28,6 +28,8 @@ from ffsubsync.constants import (
     DEFAULT_MIN_SCORE,
     DEFAULT_NON_SPEECH_LABEL,
     DEFAULT_QUALITY_MAX_OFFSET_SECONDS,
+    DEFAULT_SPLIT_LENGTH_PENALTY,
+    DEFAULT_SPLIT_PENALTY_SECONDS,
     DEFAULT_START_SECONDS,
     DEFAULT_VAD,
     FRAMERATE_RATIOS,
@@ -53,11 +55,18 @@ from ffsubsync.speech_transformers import (
     WhisperSpeechTransformer,
     make_subtitle_speech_pipeline,
 )
+from ffsubsync.split_aligner import (
+    compute_split_offsets,
+    enforce_cue_order,
+    log_split_segments,
+    split_segments,
+)
 from ffsubsync.subtitle_parser import make_subtitle_parser
 from ffsubsync.subtitle_transformers import (
     PiecewiseSubtitleShifter,
     SubtitleMerger,
     SubtitleShifter,
+    VariableSubtitleShifter,
 )
 from ffsubsync.version import get_version
 
@@ -224,6 +233,67 @@ def _primary_has_no_drift(
         and abs(off_a - primary_offset) <= tolerance_samples
         and abs(off_b - primary_offset) <= tolerance_samples
     )
+
+
+def _compute_split_offsets(
+    args: argparse.Namespace,
+    reference_speech: np.ndarray,
+    best_srt_pipe: Pipeline,
+    offset_samples: int,
+    srt_pipe_maker: Callable[[float | None], Pipeline | Callable[[float], Pipeline]],
+    srtin: str | None,
+) -> tuple[list[float], Pipeline]:
+    """Per-cue offsets (in samples) from the split-penalty aligner.
+
+    Each candidate framerate scale gets its own global FFT offset; the DP then
+    searches +-max_offset_seconds around it, so a jump as large as the global
+    search allows (an ad break, a cut scene) can be found. The scale whose DP
+    objective is highest wins (DP scores are only compared with DP scores).
+    Returns the offsets and the pipeline of the chosen scale.
+    """
+    best_scale = best_srt_pipe.named_steps["scale"].scale_factor
+    candidates: list[tuple[Pipeline, int]] = [(best_srt_pipe, offset_samples)]
+    ratios = [
+        1.0,
+        *get_framerate_ratios_to_try(argparse.Namespace(**override(args, gss=False))),
+    ]
+    max_offset_samples = int(args.max_offset_seconds * SAMPLE_RATE)
+    for ratio in ratios:
+        if ratio is None or abs(ratio - best_scale) < 1e-9:
+            continue
+        pipe = srt_pipe_maker(ratio)
+        if callable(pipe):
+            continue
+        pipe.fit(srtin)
+        aligner = FFTAligner(max_offset_samples=max_offset_samples)
+        aligner.fit(reference_speech, pipe.transform(srtin))
+        if aligner.best_offset_ is not None:
+            candidates.append((pipe, aligner.best_offset_))
+
+    best: tuple[float, list[float], Pipeline] | None = None
+    for pipe, global_offset in candidates:
+        residuals, score = compute_split_offsets(
+            reference_speech,
+            list(pipe.named_steps["scale"].subs_),
+            sample_rate=SAMPLE_RATE,
+            start_seconds=args.start_seconds - global_offset / float(SAMPLE_RATE),
+            split_penalty=args.split_penalty * SAMPLE_RATE,
+            max_offset_samples=max_offset_samples,
+            length_penalty=args.split_length_penalty,
+        )
+        if best is None or score > best[0]:
+            best = (score, [global_offset + r for r in residuals], pipe)
+    assert best is not None
+    _, offsets, chosen_pipe = best
+    if chosen_pipe is not best_srt_pipe:
+        logger.info(
+            "split search preferred framerate scale %.3f (single-offset search had "
+            "chosen %.3f)",
+            chosen_pipe.named_steps["scale"].scale_factor,
+            best_scale,
+        )
+    cues = list(chosen_pipe.named_steps["scale"].subs_)
+    return enforce_cue_order(cues, offsets, sample_rate=SAMPLE_RATE), chosen_pipe
 
 
 def _compute_piecewise_anchors(
@@ -424,6 +494,7 @@ def try_sync(
         try:
             skip_sync = args.skip_sync or reference_pipe is None
             srtout = srtin if args.overwrite_input else args.srtout
+            reference_speech: np.ndarray | None = None
 
             # Preflight: fast check whether the subtitle is already in sync.
             if (
@@ -611,7 +682,31 @@ def try_sync(
             output_steps: list[tuple[str, TransformerMixin]] = [
                 ("shift", SubtitleShifter(offset_seconds))
             ]
-            if getattr(args, "piecewise_audio", False) and not skip_sync:
+            if (
+                getattr(args, "split_penalty", None) is not None
+                and reference_speech is not None
+            ):
+                offsets_samples, split_pipe = _compute_split_offsets(
+                    args,
+                    reference_speech,
+                    best_srt_pipe,
+                    offset_samples,
+                    srt_pipe_maker,
+                    srtin,
+                )
+                log_split_segments(offsets_samples, SAMPLE_RATE)
+                result["split_segments"] = split_segments(offsets_samples, SAMPLE_RATE)
+                offsets_seconds = [
+                    off / float(SAMPLE_RATE) + args.apply_offset_seconds
+                    for off in offsets_samples
+                ]
+                scale_step = split_pipe.named_steps["scale"]
+                if offsets_seconds:
+                    offset_seconds = float(np.median(offsets_seconds))
+                output_steps = [("shift", VariableSubtitleShifter(offsets_seconds))]
+            elif (
+                getattr(args, "piecewise_audio", False) and reference_speech is not None
+            ):
                 anchors = _compute_piecewise_anchors(
                     args, reference_speech, best_srt_pipe, offset_samples
                 )
@@ -797,6 +892,11 @@ def validate_args(args: argparse.Namespace) -> None:
         and _ref_format(args.reference) in (*SUBTITLE_EXTENSIONS, "npy", "npz")
     ):
         raise ValueError("--pgs-ref-stream needs a video file as the reference")
+    if getattr(args, "split_penalty", None) is not None:
+        if getattr(args, "piecewise_audio", False):
+            raise ValueError("--split-penalty and --piecewise-audio are exclusive")
+        if args.split_penalty <= 0:
+            raise ValueError("--split-penalty must be positive")
     if args.srtin:
         if len(args.srtin) > 1 and not args.overwrite_input:
             raise ValueError(
@@ -1229,6 +1329,27 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
         help="After the global fit, correct remaining mid-file drift by "
         "measuring residual offsets in overlapping windows of the reference "
         "audio and warping subtitle timings between them.",
+    )
+    parser.add_argument(
+        "--split-penalty",
+        nargs="?",
+        type=float,
+        const=DEFAULT_SPLIT_PENALTY_SECONDS,
+        default=None,
+        help="After the global fit, let each cue take its own offset "
+        "(alass-style) and charge this many seconds of speech overlap per "
+        "change of offset. Corrects discrete jumps (ad breaks, cut or added "
+        "scenes) at cue resolution. A bare flag uses "
+        f"{DEFAULT_SPLIT_PENALTY_SECONDS:g}; lower splits more eagerly. "
+        "Cannot be combined with --piecewise-audio.",
+    )
+    parser.add_argument(
+        "--split-length-penalty",
+        type=float,
+        default=DEFAULT_SPLIT_LENGTH_PENALTY,
+        help="Only used with --split-penalty. Weight of the term that rewards cue "
+        "edges lining up with speech boundaries (0 = plain overlap, "
+        f"default={DEFAULT_SPLIT_LENGTH_PENALTY:g}).",
     )
     parser.add_argument(
         "--piecewise-window-seconds",

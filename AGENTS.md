@@ -78,6 +78,12 @@ setuptools and Versioneer.
   available; `--piecewise-window` (milliseconds) applies only to that path.
   When the picked stream is PGS there is no text to warp, so ssync runs the
   engine's audio-style piecewise against the PGS timings instead.
+- `--piecewise-mode split` (with `--piecewise`) runs the engine's split-penalty
+  aligner (`--split-penalty`, ssync default 30 s) instead of drift anchors, for
+  discrete jumps. It always goes through the engine, also with an embedded text
+  reference (the extracted `.srt` is the reference). Drift mode cannot fix a
+  jump larger than `DEFAULT_MAX_RESIDUAL_OFFSET_SECONDS` (15 s); split mode
+  searches +-`--max-offset-seconds` around the global offset.
 
 On this Ubuntu machine, prior local deployment used a `pipxu` managed install and
 `/home/ubuntu/bin/ssync` is a user-facing wrapper. If the user asks to install or
@@ -189,6 +195,14 @@ physical ratio.
   Wired into the engine by `--piecewise-audio` and into `ssync` by `--piecewise`.
   Note FFT scores are unnormalized and often negative, so score gating must be
   rank-based, never relative to a mean or median.
+- `ffsubsync/split_aligner.py`: alass-style split-penalty DP (ported from
+  upstream). `compute_split_offsets()` returns one offset per cue plus the DP
+  objective; `enforce_cue_order()` moves orphan cues at negative jumps after the
+  previous segment. The engine helper `_compute_split_offsets()` in
+  `ffsubsync.py` centers the search on each framerate candidate's own global FFT
+  offset and keeps the scale with the best DP objective; `VariableSubtitleShifter`
+  applies the result. Upstream's default penalty (5 s) splits correct files
+  against a real VAD reference; the fork's default is 30 s (see `constants.py`).
 - `ffsubsync/ten_vad_onnx.py` and `ffsubsync/onnx_models/`: ONNX TEN-VAD
   compatibility backend.
 - `ffsubsync/tools/piecewise_sync.py`: standalone tool for progressive mid-file

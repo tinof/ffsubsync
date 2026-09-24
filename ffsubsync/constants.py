@@ -28,6 +28,15 @@ DEFAULT_MIN_SCORE: float = 0.0
 DEFAULT_QUALITY_MAX_OFFSET_SECONDS: float = 60.0
 DEFAULT_MAX_FRAMERATE_DEVIATION: float = 0.1
 
+# Split-penalty alignment (--split-penalty). The penalty is in seconds of speech
+# overlap that a split must gain; the length penalty weights the edge/guard term.
+# Upstream uses 5 s, which is too eager against a real audio (VAD) reference: on
+# seven real episodes it split already-correct subtitles into up to 53 segments.
+# 30 s left all seven untouched and fixed an injected 20 s jump, apart from a few
+# cues next to it (56 of 3367 cues); 60 s and above no longer find the jump.
+DEFAULT_SPLIT_PENALTY_SECONDS: float = 30.0
+DEFAULT_SPLIT_LENGTH_PENALTY: float = 0.25
+
 SUBTITLE_EXTENSIONS: tuple[str, ...] = ("srt", "ass", "ssa", "sub")
 
 GITHUB_DEV_USER: str = "smacke"

@@ -97,6 +97,18 @@ python -m ffsubsync.tools.piecewise_sync french.srt finnish.srt synced_finnish.s
 python -m ffsubsync.tools.piecewise_sync --window 30000 reference.srt input.srt output.srt
 ```
 
+### Split Mode for Jumps (Ad Breaks, Cut Scenes)
+
+Drift correction interpolates between measured anchors, which suits gradual drift but blurs a sudden jump and cannot follow one larger than 15 s. `--piecewise-mode split` instead gives each cue its own offset and charges a penalty for each change of offset (the alass approach, ported from upstream). The jump then lands exactly between two cues.
+
+```bash
+ssync --piecewise --piecewise-mode split "Episode.mkv"
+ssync --piecewise --piecewise-mode split --split-penalty 15 "Episode.mkv"   # split more eagerly
+ffs video.mkv -i in.srt -o out.srt --split-penalty 30
+```
+
+The penalty is the seconds of speech overlap a jump must gain. Upstream's default of 5 s is too eager against real audio: on seven real episodes it split already-correct subtitles into up to 53 pieces. At 30 s (the fork's default) all seven stayed untouched, and an injected 20 s jump was fixed except for a few cues right next to it (56 of 3367 cues). A segment of less than about a minute of dialogue between two jumps needs a lower penalty.
+
 ### ARM64 Support via ONNX TEN-VAD
 
 The native `ten-vad` package ships prebuilt binaries only for Linux x64 and macOS. This fork adds an ONNX Runtime-based backend that exposes the same interface on all platforms, including ARM64 Linux (Oracle Cloud, AWS Graviton, Raspberry Pi).

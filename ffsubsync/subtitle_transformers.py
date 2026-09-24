@@ -91,6 +91,43 @@ class PiecewiseSubtitleShifter(SubsMixin, TransformerMixin):
         return self.subs_
 
 
+class VariableSubtitleShifter(SubsMixin, TransformerMixin):
+    """Shift each cue by its own offset (the split-penalty aligner's output).
+
+    ``offsets_seconds`` must be parallel to the input cues: one offset per cue,
+    in the same order. Starts are clamped at zero and durations are preserved,
+    as in :class:`PiecewiseSubtitleShifter`.
+    """
+
+    def __init__(self, offsets_seconds):
+        super(SubsMixin, self).__init__()
+        self.offsets = [float(off) for off in offsets_seconds]
+
+    def fit(self, subs: GenericSubtitlesFile, *_):
+        if len(self.offsets) != len(subs):
+            raise ValueError(
+                f"expected one offset per cue (got {len(self.offsets)} offsets "
+                f"for {len(subs)} cues)"
+            )
+        shifted_subs = []
+        for sub, offset in zip(subs, self.offsets, strict=True):
+            start = sub.start.total_seconds()
+            duration = sub.end.total_seconds() - start
+            new_start = max(0.0, start + offset)
+            shifted_subs.append(
+                GenericSubtitle(
+                    timedelta(seconds=new_start),
+                    timedelta(seconds=new_start + duration),
+                    sub.inner,
+                )
+            )
+        self.subs_ = subs.clone_props_for_subs(shifted_subs)
+        return self
+
+    def transform(self, *_):
+        return self.subs_
+
+
 class SubtitleMerger(SubsMixin, TransformerMixin):
     def __init__(self, reference_subs, first="reference"):
         assert first in ("reference", "output")

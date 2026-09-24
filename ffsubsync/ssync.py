@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from ffsubsync.constants import DEFAULT_SPLIT_PENALTY_SECONDS
 from ffsubsync.ffsubsync import make_parser, run
 
 DEFAULT_SUB_LANG = "fin"
@@ -54,6 +55,9 @@ VIDEO_EXTENSIONS = {
 }
 
 ReferenceSource = Literal["audio", "embedded"]
+# drift: anchor interpolation for progressive drift (engine --piecewise-audio).
+# split: per-cue offsets with a split penalty for jumps (engine --split-penalty).
+PiecewiseMode = Literal["drift", "split"]
 ResultStatus = Literal["synced", "failed", "skipped", "dry_run", "kept_original"]
 
 
@@ -80,6 +84,9 @@ class SyncTuning:
     no_auto_sync: bool = False
     # Keep the original subtitle when the engine flags the sync as low quality.
     quality_gate: bool = True
+    # Which engine correction --piecewise runs, and the split mode's penalty.
+    piecewise_mode: PiecewiseMode = "drift"
+    split_penalty: float = DEFAULT_SPLIT_PENALTY_SECONDS
 
 
 @dataclass(frozen=True)
@@ -228,14 +235,28 @@ def _build_parser() -> argparse.ArgumentParser:
 
     piecewise = parser.add_argument_group(
         "piecewise mode",
-        "For progressive mid-file drift that a single offset cannot fix.",
+        "For mid-file drift or jumps that a single offset cannot fix.",
     )
     piecewise.add_argument(
         "--piecewise",
         action="store_true",
         help="Correct drift piece by piece. Against the audio by default; "
-        "with --reference-source embedded, warps against an extracted "
-        "embedded subtitle stream instead",
+        "with --reference-source embedded, against an embedded subtitle stream",
+    )
+    piecewise.add_argument(
+        "--piecewise-mode",
+        choices=("drift", "split"),
+        default="drift",
+        help="drift (default): follow gradual drift by interpolating between "
+        "measured anchors. split: give each cue its own offset and fix "
+        "discrete jumps (ad breaks, cut or added scenes) at cue resolution",
+    )
+    piecewise.add_argument(
+        "--split-penalty",
+        type=float,
+        default=DEFAULT_SPLIT_PENALTY_SECONDS,
+        help="Seconds of speech overlap a jump must gain in split mode; lower "
+        f"splits more eagerly (default: {DEFAULT_SPLIT_PENALTY_SECONDS:g})",
     )
     piecewise.add_argument(
         "--piecewise-window",
@@ -270,6 +291,8 @@ def parse_options(argv: Sequence[str] | None = None) -> SsyncOptions:
             no_fix_framerate=args.no_fix_framerate,
             no_auto_sync=args.no_auto_sync,
             quality_gate=args.quality_gate,
+            piecewise_mode=args.piecewise_mode,
+            split_penalty=args.split_penalty,
         ),
         piecewise=args.piecewise,
         piecewise_window=args.piecewise_window,
@@ -567,8 +590,7 @@ def choose_reference_source(job: SsyncJob, temp_dir: Path) -> SsyncSyncRequest:
             force_audio_vad=True,
             message=(
                 f"Synchronizing subtitles for {job.video.name} using audio "
-                "track as reference"
-                + (" with piecewise drift correction" if job.piecewise else "")
+                "track as reference" + _piecewise_note(job)
             ),
             tuning=job.tuning,
             piecewise_audio=job.piecewise,
@@ -600,7 +622,7 @@ def choose_reference_source(job: SsyncJob, temp_dir: Path) -> SsyncSyncRequest:
             message=(
                 f"Synchronizing subtitles for {job.video.name} using embedded PGS "
                 f"subtitle stream #{embedded_stream.get('index')} as reference"
-                + (" with piecewise drift correction" if job.piecewise else "")
+                + _piecewise_note(job)
             ),
             tuning=job.tuning,
             piecewise_audio=job.piecewise,
@@ -634,9 +656,19 @@ def choose_reference_source(job: SsyncJob, temp_dir: Path) -> SsyncSyncRequest:
         message=(
             f"Synchronizing subtitles for {job.video.name} using embedded subtitle "
             f"stream #{embedded_stream.get('index')} as reference"
+            + _piecewise_note(job)
         ),
         tuning=job.tuning,
+        piecewise_audio=job.piecewise,
     )
+
+
+def _piecewise_note(job: SsyncJob) -> str:
+    if not job.piecewise:
+        return ""
+    if job.tuning.piecewise_mode == "split":
+        return f" with split correction (penalty {job.tuning.split_penalty:g}s)"
+    return " with piecewise drift correction"
 
 
 def build_sync_args(request: SsyncSyncRequest) -> argparse.Namespace:
@@ -672,7 +704,10 @@ def build_sync_args(request: SsyncSyncRequest) -> argparse.Namespace:
             args.quality_max_offset_seconds, tuning.max_offset_seconds
         )
     if request.piecewise_audio:
-        args.piecewise_audio = True
+        if tuning.piecewise_mode == "split":
+            args.split_penalty = tuning.split_penalty
+        else:
+            args.piecewise_audio = True
     if request.pgs_stream is not None:
         args.pgs_ref_stream = request.pgs_stream
     return args
@@ -680,7 +715,12 @@ def build_sync_args(request: SsyncSyncRequest) -> argparse.Namespace:
 
 def _dry_run_job(job: SsyncJob) -> SsyncResult:
     if job.piecewise:
-        if job.reference_source == "embedded":
+        if job.tuning.piecewise_mode == "split":
+            _print(
+                f"Mode: piecewise (split, penalty {job.tuning.split_penalty:g}s), "
+                f"{job.reference_source} reference"
+            )
+        elif job.reference_source == "embedded":
             _print(
                 f"Mode: piecewise, embedded reference (window {job.piecewise_window}ms)"
             )
@@ -797,9 +837,13 @@ def execute_job(
             stream = _pick_reference_subtitle_stream(
                 _embedded_subtitle_streams(job.video), job.lang
             )
-            # A text stream is warped with tools/piecewise_sync. A PGS stream has
-            # no text, so the engine does audio-style piecewise against its timings.
-            if stream is None or not _is_pgs_stream(stream):
+            # In drift mode a text stream is warped with tools/piecewise_sync. A PGS
+            # stream has no text, and split mode is an engine feature, so both go
+            # through the engine with the stream as reference.
+            use_tool = job.tuning.piecewise_mode == "drift" and (
+                stream is None or not _is_pgs_stream(stream)
+            )
+            if use_tool:
                 return _execute_piecewise_job(job, stream, Path(temp_name))
 
         request = choose_reference_source(job, Path(temp_name))

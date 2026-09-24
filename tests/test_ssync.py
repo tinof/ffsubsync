@@ -933,6 +933,99 @@ class TestQualityGate:
         assert "Quality gate: off" in capsys.readouterr().err
 
 
+class TestSplitMode:
+    def test_split_mode_sets_engine_split_penalty(self, tmp_path):
+        video, _ = _make_video_and_subtitle(tmp_path)
+        captured_args = []
+
+        main(
+            [str(video), "--piecewise", "--piecewise-mode", "split"],
+            executor=_fake_executor(captured_args),
+        )
+
+        assert captured_args[0].split_penalty == 30.0
+        assert captured_args[0].piecewise_audio is False
+
+    def test_split_penalty_is_forwarded(self, tmp_path):
+        video, _ = _make_video_and_subtitle(tmp_path)
+        captured_args = []
+
+        main(
+            [
+                str(video),
+                "--piecewise",
+                "--piecewise-mode",
+                "split",
+                "--split-penalty",
+                "2",
+            ],
+            executor=_fake_executor(captured_args),
+        )
+
+        assert captured_args[0].split_penalty == 2.0
+
+    def test_split_mode_needs_piecewise(self, tmp_path):
+        video, _ = _make_video_and_subtitle(tmp_path)
+        captured_args = []
+
+        main(
+            [str(video), "--piecewise-mode", "split"],
+            executor=_fake_executor(captured_args),
+        )
+
+        assert captured_args[0].split_penalty is None
+
+    def test_split_mode_uses_engine_with_embedded_text_reference(
+        self, tmp_path, monkeypatch
+    ):
+        video, _ = _make_video_and_subtitle(tmp_path)
+        monkeypatch.setattr(
+            "ffsubsync.ssync._embedded_subtitle_streams",
+            lambda _: [
+                {"index": 3, "codec_name": "subrip", "tags": {"language": "eng"}}
+            ],
+        )
+
+        def fake_extract(_, stream, temp_dir):
+            extracted = temp_dir / f"embedded-reference-{stream['index']}.srt"
+            extracted.write_text(SRT_SAMPLE)
+            return extracted
+
+        monkeypatch.setattr(
+            "ffsubsync.ssync._extract_embedded_reference_subtitle", fake_extract
+        )
+
+        def fail_if_tool_used(*_):
+            raise AssertionError("split mode runs in the engine, not the tool")
+
+        monkeypatch.setattr("ffsubsync.ssync._execute_piecewise_job", fail_if_tool_used)
+        captured_args = []
+
+        main(
+            [
+                str(video),
+                "--reference-source",
+                "embedded",
+                "--piecewise",
+                "--piecewise-mode",
+                "split",
+            ],
+            executor=_fake_executor(captured_args),
+        )
+
+        assert captured_args[0].split_penalty == 30.0
+        assert captured_args[0].reference.endswith("embedded-reference-3.srt")
+
+    def test_dry_run_reports_split_mode(self, tmp_path, capsys):
+        video, _ = _make_video_and_subtitle(tmp_path)
+
+        main([str(video), "--dry-run", "--piecewise", "--piecewise-mode", "split"])
+
+        assert "Mode: piecewise (split, penalty 30s), audio reference" in (
+            capsys.readouterr().err
+        )
+
+
 class TestPiecewiseMode:
     def test_piecewise_defaults_to_audio_reference(self):
         options = parse_options(["video.mkv", "--piecewise"])

@@ -30,6 +30,9 @@ PREFERRED_REFERENCE_LANGS = ("eng", "en")
 BITMAP_SUBTITLE_CODECS = frozenset(
     {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "dvb_teletext", "xsub"}
 )
+# PGS is image-based too, but its caption timings can be read from the container,
+# so the engine can use it as a reference directly (--pgs-ref-stream).
+PGS_CODEC = "hdmv_pgs_subtitle"
 LANG_ALIASES = {
     "fin": ("fin", "fi"),
     "fi": ("fi", "fin"),
@@ -116,6 +119,8 @@ class SsyncSyncRequest:
     message: str
     tuning: SyncTuning = SyncTuning()
     piecewise_audio: bool = False
+    # ffmpeg specifier of an embedded PGS track to use as the reference.
+    pgs_stream: str | None = None
 
 
 @dataclass(frozen=True)
@@ -411,21 +416,34 @@ def _is_text_subtitle_stream(stream: dict[str, object]) -> bool:
     return str(stream.get("codec_name", "")).lower() not in BITMAP_SUBTITLE_CODECS
 
 
+def _is_pgs_stream(stream: dict[str, object]) -> bool:
+    return str(stream.get("codec_name", "")).lower() == PGS_CODEC
+
+
 def _pick_reference_subtitle_stream(
     streams: list[dict[str, object]], target_lang: str
 ) -> dict[str, object] | None:
-    streams = [s for s in streams if _is_text_subtitle_stream(s)]
-    if not streams:
-        return None
+    """Pick the embedded subtitle stream to use as the sync reference.
 
+    Order: a text stream in another language (English first), then a PGS stream in
+    another language (English first), then a stream in the target language (text
+    first). Other image-based codecs (VobSub, DVB) are never used: ffmpeg cannot
+    convert them to text and they carry no usable timings.
+    """
     target = _normalize_lang(target_lang)
-    non_target = [s for s in streams if _stream_language(s) != target]
-    candidates = non_target or streams
-    for preferred in PREFERRED_REFERENCE_LANGS:
-        for stream in candidates:
-            if _stream_language(stream) == preferred:
-                return stream
-    return candidates[0]
+
+    def rank(stream: dict[str, object]) -> tuple[int, int, int]:
+        lang = _stream_language(stream)
+        is_target = int(lang == target)
+        is_pgs = int(_is_pgs_stream(stream))
+        not_preferred = int(lang not in PREFERRED_REFERENCE_LANGS)
+        return (is_target, is_pgs, not_preferred)
+
+    usable = [s for s in streams if _is_text_subtitle_stream(s) or _is_pgs_stream(s)]
+    if not usable:
+        return None
+    # min() keeps the first stream among equal ranks, so file order breaks ties.
+    return min(usable, key=rank)
 
 
 def _extract_embedded_reference_subtitle(
@@ -568,6 +586,25 @@ def choose_reference_source(job: SsyncJob, temp_dir: Path) -> SsyncSyncRequest:
             force_audio_vad=True,
             message="No embedded subtitle reference found; using audio track as reference",
             tuning=job.tuning,
+            piecewise_audio=job.piecewise,
+        )
+
+    if _is_pgs_stream(embedded_stream):
+        # No extraction: the engine reads the PGS caption timings itself.
+        return SsyncSyncRequest(
+            reference=job.video,
+            subtitle=job.subtitle,
+            output=job.output,
+            preflight=job.preflight,
+            force_audio_vad=False,
+            message=(
+                f"Synchronizing subtitles for {job.video.name} using embedded PGS "
+                f"subtitle stream #{embedded_stream.get('index')} as reference"
+                + (" with piecewise drift correction" if job.piecewise else "")
+            ),
+            tuning=job.tuning,
+            piecewise_audio=job.piecewise,
+            pgs_stream=f"0:{embedded_stream.get('index')}",
         )
 
     extracted = _extract_embedded_reference_subtitle(
@@ -585,6 +622,7 @@ def choose_reference_source(job: SsyncJob, temp_dir: Path) -> SsyncSyncRequest:
                 "using audio track as reference"
             ),
             tuning=job.tuning,
+            piecewise_audio=job.piecewise,
         )
 
     return SsyncSyncRequest(
@@ -635,6 +673,8 @@ def build_sync_args(request: SsyncSyncRequest) -> argparse.Namespace:
         )
     if request.piecewise_audio:
         args.piecewise_audio = True
+    if request.pgs_stream is not None:
+        args.pgs_ref_stream = request.pgs_stream
     return args
 
 
@@ -657,7 +697,8 @@ def _dry_run_job(job: SsyncJob) -> SsyncResult:
             _print(
                 "Embedded subtitle reference: "
                 f"stream #{embedded_stream.get('index')} "
-                f"({_stream_language(embedded_stream) or 'unknown'})"
+                f"({_stream_language(embedded_stream) or 'unknown'}, "
+                f"{embedded_stream.get('codec_name') or 'unknown codec'})"
             )
         else:
             _print("Embedded subtitle reference: none; would use audio")
@@ -683,12 +724,11 @@ def _skipped(job: SsyncJob, reason: str) -> SsyncResult:
     )
 
 
-def _execute_piecewise_job(job: SsyncJob, temp_dir: Path) -> SsyncResult:
+def _execute_piecewise_job(
+    job: SsyncJob, stream: dict[str, object] | None, temp_dir: Path
+) -> SsyncResult:
     from ffsubsync.tools.piecewise_sync import parse_srt, piecewise_sync, write_srt
 
-    stream = _pick_reference_subtitle_stream(
-        _embedded_subtitle_streams(job.video), job.lang
-    )
     if stream is None:
         return _skipped(
             job,
@@ -754,7 +794,13 @@ def execute_job(
 
     with tempfile.TemporaryDirectory(prefix="ffsubsync-ssync-") as temp_name:
         if job.piecewise and job.reference_source == "embedded":
-            return _execute_piecewise_job(job, Path(temp_name))
+            stream = _pick_reference_subtitle_stream(
+                _embedded_subtitle_streams(job.video), job.lang
+            )
+            # A text stream is warped with tools/piecewise_sync. A PGS stream has
+            # no text, so the engine does audio-style piecewise against its timings.
+            if stream is None or not _is_pgs_stream(stream):
+                return _execute_piecewise_job(job, stream, Path(temp_name))
 
         request = choose_reference_source(job, Path(temp_name))
         _print(request.message)

@@ -46,6 +46,7 @@ from ffsubsync.preflight import check_already_synced
 from ffsubsync.sklearn_shim import Pipeline, TransformerMixin
 from ffsubsync.speech_transformers import (
     DeserializeSpeechTransformer,
+    PGSSpeechTransformer,
     VideoSpeechTransformer,
     WhisperSpeechTransformer,
     make_subtitle_speech_pipeline,
@@ -655,6 +656,24 @@ def make_reference_pipe(args: argparse.Namespace) -> Pipeline:
         return Pipeline(
             [("deserialize", DeserializeSpeechTransformer(args.non_speech_label))]
         )
+    elif getattr(args, "pgs_ref_stream", None) is not None:
+        if args.vad is not None:
+            logger.warning("Vad specified, but the reference is a PGS subtitle stream")
+        # "auto" (bare --pgs-ref-stream) lets the transformer find the first track.
+        pgs_stream = None if args.pgs_ref_stream == "auto" else args.pgs_ref_stream
+        return Pipeline(
+            [
+                (
+                    "speech_extract",
+                    PGSSpeechTransformer(
+                        sample_rate=SAMPLE_RATE,
+                        start_seconds=args.start_seconds,
+                        ffmpeg_path=args.ffmpeg_path,
+                        ref_stream=pgs_stream,
+                    ),
+                ),
+            ]
+        )
     else:
         vad = args.vad or DEFAULT_VAD
         if args.reference_encoding is not None:
@@ -757,6 +776,12 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(
                 "at least one of `srtin` or `reference` must be specified to apply offset seconds"
             )
+    if (
+        getattr(args, "pgs_ref_stream", None) is not None
+        and args.reference is not None
+        and _ref_format(args.reference) in (*SUBTITLE_EXTENSIONS, "npy", "npz")
+    ):
+        raise ValueError("--pgs-ref-stream needs a video file as the reference")
     if args.srtin:
         if len(args.srtin) > 1 and not args.overwrite_input:
             raise ValueError(
@@ -981,6 +1006,20 @@ def add_main_args_for_cli(parser: argparse.ArgumentParser) -> None:
             "uses the first subtitle track; 0:a:3 would use the third audio track. "
             "You can also drop the leading `0:`; i.e. use s:0 or a:3, respectively. "
             "Example: `ffs ref.mkv -i in.srt -o out.srt --reference-stream s:2`"
+        ),
+    )
+    parser.add_argument(
+        "--pgs-ref-stream",
+        "--pgsstream",
+        nargs="?",
+        const="auto",
+        default=None,
+        help=(
+            "Use the caption timings of an image-based PGS (Blu-ray) subtitle track "
+            "in the video as the reference, instead of the audio. Omit the value to "
+            "use the first PGS track, or give an ffmpeg stream specifier. Example: "
+            "`ffs ref.mkv -i in.srt -o out.srt --pgs-ref-stream` (first PGS track) "
+            "or `--pgs-ref-stream s:2`."
         ),
     )
 

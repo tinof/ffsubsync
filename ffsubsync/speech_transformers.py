@@ -690,3 +690,185 @@ class DeserializeSpeechTransformer(TransformerMixin):
     def transform(self, *_) -> np.ndarray:
         assert self.deserialized_speech_results_ is not None
         return self.deserialized_speech_results_
+
+
+PGS_CODEC: str = "hdmv_pgs_subtitle"
+# PGS "clear" packets remove the caption from the screen and carry no image. They
+# are about 30 bytes, so anything this small is not a displayed caption.
+_PGS_MIN_SHOW_PACKET_BYTES: int = 50
+# Upper bound for a caption whose end is taken from the next packet, so a missing
+# clear event cannot turn one caption into minutes of "speech".
+_PGS_MAX_CAPTION_SECONDS: float = float(DEFAULT_MAX_SUBTITLE_SECONDS)
+
+
+def find_pgs_stream(fname: str, ffmpeg_path: str | None = None) -> str | None:
+    """Return the ffmpeg specifier (e.g. ``"0:s:1"``) of the first PGS track.
+
+    Returns ``None`` when ffprobe fails or the file has no PGS subtitle stream.
+    """
+    try:
+        probe = ffmpeg.probe(
+            fname, cmd=ffmpeg_bin_path("ffprobe", ffmpeg_resources_path=ffmpeg_path)
+        )
+    except Exception as e:
+        logger.warning("ffprobe failed while searching for PGS streams: %s", e)
+        return None
+
+    sub_index = 0
+    for stream in probe.get("streams", []):
+        if stream.get("codec_type") != "subtitle":
+            continue
+        if stream.get("codec_name") == PGS_CODEC:
+            specifier = f"0:s:{sub_index}"
+            logger.info(
+                "auto-detected PGS stream: %s (ffmpeg stream index %s)",
+                specifier,
+                stream.get("index"),
+            )
+            return specifier
+        sub_index += 1
+    return None
+
+
+def _get_pgs_timings_via_ffprobe(
+    fname: str, stream: str, ffmpeg_path: str | None = None
+) -> list[tuple[float, float]] | None:
+    """Read PGS caption timings from container packet metadata with ffprobe.
+
+    The container stores a presentation timestamp for every subtitle packet, so
+    caption times are available without decoding the bitmaps. A caption starts
+    at a large "show" packet and ends at the next tiny "clear" packet. Some
+    muxers also store ``duration_time`` on show packets; it is used when present,
+    otherwise the caption ends at the next packet, capped at
+    ``_PGS_MAX_CAPTION_SECONDS``.
+
+    Returns ``(start_seconds, end_seconds)`` tuples, or ``None`` when ffprobe
+    fails or no caption can be recovered.
+    """
+    # ffprobe -select_streams does not accept the "0:" input-index prefix.
+    probe_stream = stream[2:] if stream.startswith("0:") else stream
+    try:
+        probe_data = ffmpeg.probe(
+            fname,
+            cmd=ffmpeg_bin_path("ffprobe", ffmpeg_resources_path=ffmpeg_path),
+            show_packets=None,
+            select_streams=probe_stream,
+            show_entries="packet=pts_time,duration_time,size",
+        )
+    except Exception:
+        return None
+
+    packets: list[tuple[float, float | None, int]] = []
+    for packet in probe_data.get("packets", []):
+        try:
+            pts_time = float(packet["pts_time"])
+            size = int(packet["size"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        duration: float | None
+        try:
+            duration = float(packet.get("duration_time", "N/A"))
+        except (TypeError, ValueError):
+            duration = None
+        packets.append((pts_time, duration, size))
+    packets.sort(key=lambda p: p[0])
+
+    results: list[tuple[float, float]] = []
+    for i, (pts_time, duration, size) in enumerate(packets):
+        if size <= _PGS_MIN_SHOW_PACKET_BYTES:
+            continue  # a clear event, not a displayed caption
+        if duration is not None and duration > 0:
+            end = pts_time + duration
+        elif i + 1 < len(packets):
+            end = min(packets[i + 1][0], pts_time + _PGS_MAX_CAPTION_SECONDS)
+        else:
+            continue  # last packet with no duration: its end is unknown
+        if end > pts_time:
+            results.append((pts_time, end))
+    return results or None
+
+
+class PGSSpeechTransformer(TransformerMixin, ComputeSpeechFrameBoundariesMixin):
+    """Use the timings of an image-based (PGS, Blu-ray) subtitle track as reference.
+
+    ffmpeg cannot convert PGS to text, but the container stores when each caption
+    is on screen. This transformer reads those timings with ffprobe and builds the
+    same binary speech signal that :class:`SubtitleSpeechTransformer` builds for
+    text subtitles: 1.0 while a caption is displayed, 0.0 otherwise.
+
+    ``ref_stream`` is an ffmpeg stream specifier (with or without a leading
+    ``0:``), or ``None`` to auto-detect the first PGS track.
+    """
+
+    # PGS timings are already in the video's timebase, so their extent says
+    # nothing about a framerate mismatch. None disables the length-based
+    # framerate inference in compute_alignment.
+    @property
+    def num_frames(self) -> None:
+        return None
+
+    def __init__(
+        self,
+        sample_rate: int,
+        start_seconds: int = 0,
+        ffmpeg_path: str | None = None,
+        ref_stream: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.sample_rate: int = sample_rate
+        self.start_seconds: int = start_seconds
+        self.ffmpeg_path: str | None = ffmpeg_path
+        self.ref_stream: str | None = ref_stream
+        self.pgs_speech_results_: np.ndarray | None = None
+
+    def fit(self, fname: str, *_) -> "PGSSpeechTransformer":
+        if self.ref_stream is None:
+            stream = find_pgs_stream(fname, self.ffmpeg_path)
+            if stream is None:
+                raise ValueError(
+                    f"No {PGS_CODEC} stream found in {fname}. "
+                    "Specify one explicitly with --pgs-ref-stream."
+                )
+        else:
+            stream = self.ref_stream
+            if not stream.startswith("0:"):
+                stream = "0:" + stream
+
+        logger.info("reading PGS timings for stream %s from %s...", stream, fname)
+        timings = _get_pgs_timings_via_ffprobe(fname, stream, self.ffmpeg_path)
+        if timings is None:
+            raise ValueError(
+                f"No usable PGS caption timings in stream {stream} of {fname}. "
+                f"Check that it is a {PGS_CODEC} track "
+                f"(ffprobe -show_streams {fname})."
+            )
+
+        logger.info("found %d PGS subtitle segments", len(timings))
+        for i, (start, end) in enumerate(timings[:8]):
+            logger.debug(
+                "  PGS[%d]: %s --> %s (%.3fs)",
+                i,
+                timedelta(seconds=start),
+                timedelta(seconds=end),
+                end - start,
+            )
+
+        max_time = max(end for _, end in timings)
+        num_samples = int(max_time * self.sample_rate) + 2
+        samples = np.zeros(num_samples, dtype=float)
+        for start, end in timings:
+            start_sample = round((start - self.start_seconds) * self.sample_rate)
+            end_sample = round((end - self.start_seconds) * self.sample_rate)
+            start_sample = max(start_sample, 0)
+            end_sample = min(end_sample, num_samples)
+            if start_sample < end_sample:
+                samples[start_sample:end_sample] = 1.0
+
+        self.pgs_speech_results_ = samples
+        self.fit_boundaries(samples)
+        logger.info("total PGS subtitle frames: %d", int(np.sum(samples)))
+        return self
+
+    def transform(self, *_) -> np.ndarray:
+        assert self.pgs_speech_results_ is not None
+        return self.pgs_speech_results_

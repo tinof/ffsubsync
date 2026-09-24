@@ -439,14 +439,45 @@ class TestEmbeddedReferenceSubtitleSelection:
         assert result is not None
         assert result["index"] == 3
 
-    def test_returns_none_when_only_bitmap_streams(self):
+    def test_picks_pgs_when_no_text_stream(self):
         streams = [
+            {"index": 2, "codec_name": "dvd_subtitle", "tags": {"language": "eng"}},
             {
-                "index": 2,
+                "index": 3,
+                "codec_name": "hdmv_pgs_subtitle",
+                "tags": {"language": "swe"},
+            },
+            {
+                "index": 4,
                 "codec_name": "hdmv_pgs_subtitle",
                 "tags": {"language": "eng"},
             },
-            {"index": 3, "codec_name": "dvd_subtitle", "tags": {"language": "swe"}},
+        ]
+
+        result = _pick_reference_subtitle_stream(streams, "fin")
+
+        assert result is not None
+        assert result["index"] == 4
+
+    def test_non_target_pgs_beats_target_text(self):
+        streams = [
+            {"index": 2, "codec_name": "subrip", "tags": {"language": "fin"}},
+            {
+                "index": 3,
+                "codec_name": "hdmv_pgs_subtitle",
+                "tags": {"language": "fre"},
+            },
+        ]
+
+        result = _pick_reference_subtitle_stream(streams, "fin")
+
+        assert result is not None
+        assert result["index"] == 3
+
+    def test_returns_none_when_only_unusable_bitmap_streams(self):
+        streams = [
+            {"index": 2, "codec_name": "dvd_subtitle", "tags": {"language": "eng"}},
+            {"index": 3, "codec_name": "dvb_subtitle", "tags": {"language": "swe"}},
         ]
 
         assert _pick_reference_subtitle_stream(streams, "fin") is None
@@ -766,6 +797,76 @@ class TestSyncTuning:
         assert args.no_fix_framerate is False
         assert args.auto_sync is True
         assert args.vad == "webrtc"
+
+
+PGS_STREAMS = [
+    {"index": 5, "codec_name": "hdmv_pgs_subtitle", "tags": {"language": "eng"}},
+]
+
+
+class TestPgsReference:
+    def _job(self, tmp_path, **kwargs):
+        video, subtitle = _make_video_and_subtitle(tmp_path)
+        return SsyncJob(
+            video=video,
+            subtitle=subtitle,
+            output=subtitle,
+            lang="fin",
+            reference_source="embedded",
+            **kwargs,
+        )
+
+    def test_pgs_stream_is_passed_to_the_engine_without_extraction(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "ffsubsync.ssync._embedded_subtitle_streams", lambda _: PGS_STREAMS
+        )
+
+        def fail_if_extracted(*_):
+            raise AssertionError("a PGS stream must not be extracted to text")
+
+        monkeypatch.setattr(
+            "ffsubsync.ssync._extract_embedded_reference_subtitle", fail_if_extracted
+        )
+        job = self._job(tmp_path)
+
+        request = choose_reference_source(job, tmp_path)
+        args = build_sync_args(request)
+
+        assert request.pgs_stream == "0:5"
+        assert request.reference == job.video
+        assert args.pgs_ref_stream == "0:5"
+        assert args.reference == str(job.video)
+        assert "PGS" in request.message
+
+    def test_piecewise_with_pgs_uses_engine_piecewise(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "ffsubsync.ssync._embedded_subtitle_streams", lambda _: PGS_STREAMS
+        )
+
+        def fail_if_tool_used(*_):
+            raise AssertionError("PGS has no text for tools/piecewise_sync")
+
+        monkeypatch.setattr("ffsubsync.ssync._execute_piecewise_job", fail_if_tool_used)
+        captured_args = []
+        job = self._job(tmp_path, piecewise=True)
+
+        result = execute_job(job, _fake_executor(captured_args))
+
+        assert result.status == "synced"
+        assert captured_args[0].pgs_ref_stream == "0:5"
+        assert captured_args[0].piecewise_audio is True
+
+    def test_dry_run_shows_codec(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(
+            "ffsubsync.ssync._embedded_subtitle_streams", lambda _: PGS_STREAMS
+        )
+        video, _ = _make_video_and_subtitle(tmp_path)
+
+        main([str(video), "--dry-run", "--reference-source", "embedded"])
+
+        assert "(eng, hdmv_pgs_subtitle)" in capsys.readouterr().err
 
 
 class TestQualityGate:

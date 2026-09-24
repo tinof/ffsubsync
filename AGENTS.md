@@ -41,9 +41,15 @@ setuptools and Versioneer.
 - `--preflight` is passed through to the sync engine.
 - `--reference-source audio` is the default and does not probe embedded subtitle
   streams.
-- `--reference-source embedded` opts into selecting and extracting an embedded
-  subtitle reference, preferring non-target English streams and falling back to
-  audio if extraction fails.
+- `--reference-source embedded` opts into selecting an embedded subtitle
+  reference. `_pick_reference_subtitle_stream()` ranks a text stream in another
+  language (English first), then a PGS stream in another language, then a
+  target-language stream. VobSub/DVB streams are never used. A text stream is
+  extracted to `.srt`; a PGS stream is not extracted: ssync passes it to the
+  engine as `--pgs-ref-stream 0:<index>`, and `PGSSpeechTransformer` reads the
+  caption timings from the container packets with ffprobe (caption end = next
+  "clear" packet when the muxer stores no duration). Falls back to audio if
+  there is no usable stream or text extraction fails.
 - `--dry-run` reports resolved jobs and reference policy without running
   extraction or synchronization.
 - Advanced tuning flags are forwarded to the sync engine for when the default
@@ -68,6 +74,8 @@ setuptools and Versioneer.
   `ffsubsync.tools.piecewise_sync` against an extracted embedded subtitle
   stream, and skips a video (exit code unchanged) when no embedded stream is
   available; `--piecewise-window` (milliseconds) applies only to that path.
+  When the picked stream is PGS there is no text to warp, so ssync runs the
+  engine's audio-style piecewise against the PGS timings instead.
 
 On this Ubuntu machine, prior local deployment used a `pipxu` managed install and
 `/home/ubuntu/bin/ssync` is a user-facing wrapper. If the user asks to install or

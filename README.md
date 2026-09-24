@@ -56,6 +56,17 @@ ffs video.mkv -i in.srt -o out.srt --skip-sync-on-low-quality \
 
 If you raise `ssync --max-offset-seconds`, the gate's offset limit rises with it.
 
+### PGS (Blu-ray) Subtitles as a Reference
+
+Blu-ray remuxes often carry only image-based PGS subtitles, which ffmpeg cannot turn into text. The container still records when each caption is on screen, and those timings are a clean reference signal, often better than voice detection on music-heavy audio. No audio decode is needed, though ffprobe still reads the whole file.
+
+`ssync --reference-source embedded` now uses a PGS track when no text track in another language exists. With `--piecewise` it runs the audio-style drift correction against the PGS timings. In the low-level CLI (from upstream 0.5.0, made robust to muxers that store no packet durations):
+
+```bash
+ffs movie.mkv -i in.srt -o out.srt --pgs-ref-stream        # first PGS track
+ffs movie.mkv -i in.srt -o out.srt --pgs-ref-stream s:2    # a specific track
+```
+
 ### `--preflight` — Fast "Already in Sync?" Check
 
 Passing `--preflight` (or `--skip-if-synced`) runs a short probe on the first ~2 minutes of audio before committing to the full extraction pipeline. If the subtitle is already aligned, the full pipeline is skipped entirely and the file is written with a zero shift.

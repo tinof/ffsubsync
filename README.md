@@ -43,6 +43,19 @@ ssync --lang eng "Episode.mkv"
 ssync --dry-run "Episode.mkv"
 ```
 
+### Low-Quality Safety Net — Never Overwrite a Good Subtitle With a Bad Sync
+
+`ssync` writes in place, so a wrong sync used to replace a working subtitle. The engine now checks every alignment before writing it: a negative score (the best match is anti-correlated), an offset larger than 60 s, or a framerate scale more than 0.1 away from 1.0 counts as untrustworthy. `ssync` then keeps the original subtitle, prints `Kept original subtitle for <video>: <reason>`, and exits with code 1 for that video. Piecewise correction never runs on a rejected sync.
+
+The gate is on by default in `ssync` (`--no-quality-gate` turns it off) and opt-in in the low-level CLI (from upstream 0.5.0):
+
+```bash
+ffs video.mkv -i in.srt -o out.srt --skip-sync-on-low-quality \
+    [--min-score 0] [--quality-max-offset-seconds 60] [--max-framerate-deviation 0.1]
+```
+
+If you raise `ssync --max-offset-seconds`, the gate's offset limit rises with it.
+
 ### `--preflight` — Fast "Already in Sync?" Check
 
 Passing `--preflight` (or `--skip-if-synced`) runs a short probe on the first ~2 minutes of audio before committing to the full extraction pipeline. If the subtitle is already aligned, the full pipeline is skipped entirely and the file is written with a zero shift.

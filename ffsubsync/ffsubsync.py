@@ -21,9 +21,12 @@ from ffsubsync.constants import (
     DEFAULT_APPLY_OFFSET_SECONDS,
     DEFAULT_ENCODING,
     DEFAULT_FRAME_RATE,
+    DEFAULT_MAX_FRAMERATE_DEVIATION,
     DEFAULT_MAX_OFFSET_SECONDS,
     DEFAULT_MAX_SUBTITLE_SECONDS,
+    DEFAULT_MIN_SCORE,
     DEFAULT_NON_SPEECH_LABEL,
+    DEFAULT_QUALITY_MAX_OFFSET_SECONDS,
     DEFAULT_START_SECONDS,
     DEFAULT_VAD,
     FRAMERATE_RATIOS,
@@ -358,6 +361,38 @@ def compute_alignment(
     return best_score, offset_samples, best_srt_pipe
 
 
+def assess_alignment_quality(
+    best_score: float,
+    offset_seconds: float,
+    scale_factor: float,
+    *,
+    min_score: float,
+    max_offset_seconds: float,
+    max_framerate_deviation: float,
+) -> list[str]:
+    """Return reasons an alignment looks too low-quality to trust (empty = trust it).
+
+    Used by --skip-sync-on-low-quality to leave the subtitles unmodified instead of
+    applying a probably-wrong sync. A negative score means the best alignment is
+    anti-correlated; an implausibly large offset or framerate scale suggests a
+    spurious match.
+    """
+    reasons: list[str] = []
+    if best_score < min_score:
+        reasons.append(f"score {best_score:.1f} < {min_score:.1f}")
+    if abs(offset_seconds) > max_offset_seconds:
+        reasons.append(
+            f"|offset| {abs(offset_seconds):.1f}s > {max_offset_seconds:.1f}s"
+        )
+    framerate_deviation = abs(scale_factor - 1.0)
+    if framerate_deviation > max_framerate_deviation:
+        reasons.append(
+            f"framerate deviation {framerate_deviation:.3f} > "
+            f"{max_framerate_deviation:.3f}"
+        )
+    return reasons
+
+
 def try_sync(
     args: argparse.Namespace, reference_pipe: Pipeline | None, result: dict[str, Any]
 ) -> bool:
@@ -529,6 +564,34 @@ def try_sync(
             logger.info("score: %.3f", best_score)
             logger.info("offset seconds: %.3f", offset_seconds)
             logger.info("framerate scale factor: %.3f", scale_step.scale_factor)
+            low_quality_reasons: list[str] = []
+            if getattr(args, "skip_sync_on_low_quality", False) and not skip_sync:
+                low_quality_reasons = assess_alignment_quality(
+                    best_score,
+                    offset_seconds,
+                    scale_step.scale_factor,
+                    min_score=args.min_score,
+                    max_offset_seconds=args.quality_max_offset_seconds,
+                    max_framerate_deviation=args.max_framerate_deviation,
+                )
+            if low_quality_reasons:
+                reason = "; ".join(low_quality_reasons)
+                logger.warning(
+                    "low-quality alignment (%s); leaving subtitles unmodified", reason
+                )
+                sync_was_successful = False
+                result["kept_original_reason"] = reason
+                # Write the original (unscaled, unshifted) subtitles. This runs
+                # before the piecewise step, so a rejected sync is never warped.
+                original_subs = best_srt_pipe.named_steps["parse"].subs_
+                out_subs = original_subs.clone_props_for_subs(list(original_subs))
+                if args.output_encoding != "same":
+                    out_subs = out_subs.set_encoding(args.output_encoding)
+                logger.info(
+                    "writing original (unsynced) output to %s", srtout or "stdout"
+                )
+                out_subs.write_file(srtout)
+                continue
             output_steps: list[tuple[str, TransformerMixin]] = [
                 ("shift", SubtitleShifter(offset_seconds))
             ]
@@ -969,6 +1032,39 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_APPLY_OFFSET_SECONDS,
         help="Apply a predefined offset in seconds to all subtitle segments "
         f"(default={DEFAULT_APPLY_OFFSET_SECONDS} seconds).",
+    )
+    parser.add_argument(
+        "--skip-sync-on-low-quality",
+        action="store_true",
+        help="If the alignment looks untrustworthy (see the thresholds below), "
+        "leave the subtitles unmodified instead of applying a probably-wrong "
+        "sync. Useful for batch jobs where a bad sync is worse than none.",
+    )
+    parser.add_argument(
+        "--min-score",
+        type=float,
+        default=DEFAULT_MIN_SCORE,
+        help="With --skip-sync-on-low-quality, reject alignments scoring below "
+        "this. The score's magnitude is not normalized, but its sign is "
+        f"meaningful, so the default of {DEFAULT_MIN_SCORE:.1f} rejects only "
+        "anti-correlated (clearly wrong) alignments.",
+    )
+    parser.add_argument(
+        "--quality-max-offset-seconds",
+        type=float,
+        default=DEFAULT_QUALITY_MAX_OFFSET_SECONDS,
+        help="With --skip-sync-on-low-quality, reject alignments whose offset "
+        f"exceeds this many seconds (default={DEFAULT_QUALITY_MAX_OFFSET_SECONDS:.1f}).",
+    )
+    parser.add_argument(
+        "--max-framerate-deviation",
+        type=float,
+        default=DEFAULT_MAX_FRAMERATE_DEVIATION,
+        help="With --skip-sync-on-low-quality, reject alignments whose framerate "
+        "scale deviates from 1.0 by more than this. The default of "
+        f"{DEFAULT_MAX_FRAMERATE_DEVIATION:.2f} permits every framerate correction "
+        "ffsubsync can make; tighten it only when you know the framerate should "
+        "not change.",
     )
     parser.add_argument(
         "--frame-rate",

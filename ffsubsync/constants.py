@@ -18,6 +18,16 @@ DEFAULT_VAD: str = "subs_then_webrtc"
 DEFAULT_MAX_OFFSET_SECONDS: int = 60
 DEFAULT_APPLY_OFFSET_SECONDS: int = 0
 
+# Quality gating (--skip-sync-on-low-quality). The score's sign is meaningful even
+# though its magnitude is not normalized, so 0.0 rejects only anti-correlated
+# alignments. The offset limit matches DEFAULT_MAX_OFFSET_SECONDS: subtitles from
+# another release often need more than 30 s. The framerate-deviation default clears
+# every real correction (the largest known ratio, 25/23.976, is ~1.043), so it only
+# rejects non-physical scales. Tighten it when the framerate should not change.
+DEFAULT_MIN_SCORE: float = 0.0
+DEFAULT_QUALITY_MAX_OFFSET_SECONDS: float = 60.0
+DEFAULT_MAX_FRAMERATE_DEVIATION: float = 0.1
+
 SUBTITLE_EXTENSIONS: tuple[str, ...] = ("srt", "ass", "ssa", "sub")
 
 GITHUB_DEV_USER: str = "smacke"

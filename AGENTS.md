@@ -51,6 +51,15 @@ setuptools and Versioneer.
   `--use-segmented-aligner`, `--no-fix-framerate`, and `--no-auto-sync`. An
   explicit `--vad` overrides the `webrtc` VAD that ssync forces for audio
   references.
+- The low-quality safety net is on by default: `build_sync_args()` sets the
+  engine's `--skip-sync-on-low-quality`. When `assess_alignment_quality()` in
+  `ffsubsync.py` returns reasons (negative score, offset above
+  `--quality-max-offset-seconds`, default 60 s and raised to match an explicit
+  `--max-offset-seconds`, or framerate scale deviation above 0.1), `try_sync()`
+  writes the original subtitle, sets `result["kept_original_reason"]`, and skips
+  piecewise. ssync reports `kept_original` with exit code 1.
+  `--no-quality-gate` disables it. The text-embedded piecewise path
+  (`tools/piecewise_sync`) does not go through the engine and has no gate.
 - `--piecewise` corrects progressive mid-file drift that a single offset and
   scale cannot fix. Against the **audio** by default (`ffsubsync/piecewise.py`
   measures residual offsets in overlapping windows of the cached speech

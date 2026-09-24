@@ -768,6 +768,70 @@ class TestSyncTuning:
         assert args.vad == "webrtc"
 
 
+class TestQualityGate:
+    def test_gate_is_on_by_default(self, tmp_path):
+        video, _ = _make_video_and_subtitle(tmp_path)
+        captured_args = []
+
+        main([str(video)], executor=_fake_executor(captured_args))
+
+        assert captured_args[0].skip_sync_on_low_quality is True
+
+    def test_no_quality_gate_turns_it_off(self, tmp_path):
+        video, _ = _make_video_and_subtitle(tmp_path)
+        captured_args = []
+
+        main([str(video), "--no-quality-gate"], executor=_fake_executor(captured_args))
+
+        assert captured_args[0].skip_sync_on_low_quality is False
+
+    def test_raised_max_offset_raises_the_gate_offset_limit(self, tmp_path):
+        video, _ = _make_video_and_subtitle(tmp_path)
+        captured_args = []
+
+        main(
+            [str(video), "--max-offset-seconds", "120"],
+            executor=_fake_executor(captured_args),
+        )
+
+        assert captured_args[0].quality_max_offset_seconds == 120
+
+    def test_kept_original_is_reported_and_fails_the_video(self, tmp_path, capsys):
+        video, subtitle = _make_video_and_subtitle(tmp_path)
+        job = SsyncJob(
+            video=video,
+            subtitle=subtitle,
+            output=subtitle,
+            lang="fin",
+            reference_source="audio",
+        )
+
+        def executor(_args):
+            return {"retval": 1, "kept_original_reason": "score -3.0 < 0.0"}
+
+        result = execute_job(job, executor)
+
+        assert result.status == "kept_original"
+        assert result.return_code == 1
+        assert result.kept_original_reason == "score -3.0 < 0.0"
+        assert "Kept original subtitle" in capsys.readouterr().err
+
+    def test_kept_original_sets_nonzero_exit_code(self, tmp_path):
+        video, _ = _make_video_and_subtitle(tmp_path)
+
+        def executor(_args):
+            return {"retval": 1, "kept_original_reason": "|offset| 90.0s > 60.0s"}
+
+        assert main([str(video)], executor=executor) == 1
+
+    def test_dry_run_reports_gate(self, tmp_path, capsys):
+        video, _ = _make_video_and_subtitle(tmp_path)
+
+        main([str(video), "--dry-run", "--no-quality-gate"])
+
+        assert "Quality gate: off" in capsys.readouterr().err
+
+
 class TestPiecewiseMode:
     def test_piecewise_defaults_to_audio_reference(self):
         options = parse_options(["video.mkv", "--piecewise"])

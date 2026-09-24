@@ -51,7 +51,7 @@ VIDEO_EXTENSIONS = {
 }
 
 ReferenceSource = Literal["audio", "embedded"]
-ResultStatus = Literal["synced", "failed", "skipped", "dry_run"]
+ResultStatus = Literal["synced", "failed", "skipped", "dry_run", "kept_original"]
 
 
 @dataclass(frozen=True)
@@ -75,6 +75,8 @@ class SyncTuning:
     use_segmented_aligner: bool = False
     no_fix_framerate: bool = False
     no_auto_sync: bool = False
+    # Keep the original subtitle when the engine flags the sync as low quality.
+    quality_gate: bool = True
 
 
 @dataclass(frozen=True)
@@ -126,6 +128,7 @@ class SsyncResult:
     message: str | None = None
     offset_seconds: Any = None
     framerate_scale_factor: Any = None
+    kept_original_reason: str | None = None
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -210,6 +213,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable adaptive auto-sync strategy selection",
     )
+    tuning.add_argument(
+        "--no-quality-gate",
+        dest="quality_gate",
+        action="store_false",
+        help="Write the sync even when the engine flags it as low quality "
+        "(default: keep the original subtitle instead)",
+    )
 
     piecewise = parser.add_argument_group(
         "piecewise mode",
@@ -254,6 +264,7 @@ def parse_options(argv: Sequence[str] | None = None) -> SsyncOptions:
             use_segmented_aligner=args.use_segmented_aligner,
             no_fix_framerate=args.no_fix_framerate,
             no_auto_sync=args.no_auto_sync,
+            quality_gate=args.quality_gate,
         ),
         piecewise=args.piecewise,
         piecewise_window=args.piecewise_window,
@@ -616,6 +627,12 @@ def build_sync_args(request: SsyncSyncRequest) -> argparse.Namespace:
         args.no_fix_framerate = True
     if tuning.no_auto_sync:
         args.auto_sync = False
+    args.skip_sync_on_low_quality = tuning.quality_gate
+    if tuning.max_offset_seconds is not None:
+        # An offset the user explicitly allowed must not trip the gate.
+        args.quality_max_offset_seconds = max(
+            args.quality_max_offset_seconds, tuning.max_offset_seconds
+        )
     if request.piecewise_audio:
         args.piecewise_audio = True
     return args
@@ -630,6 +647,7 @@ def _dry_run_job(job: SsyncJob) -> SsyncResult:
         else:
             _print("Mode: piecewise, audio reference")
     _print(f"Reference source: {job.reference_source}")
+    _print(f"Quality gate: {'on' if job.tuning.quality_gate else 'off'}")
     _print(f"Reference video: {job.video}")
     if job.reference_source == "embedded":
         embedded_stream = _pick_reference_subtitle_stream(
@@ -741,6 +759,19 @@ def execute_job(
         request = choose_reference_source(job, Path(temp_name))
         _print(request.message)
         result = executor(build_sync_args(request))
+
+    kept_original_reason = result.get("kept_original_reason")
+    if kept_original_reason:
+        msg = f"Kept original subtitle for {job.video.name}: {kept_original_reason}"
+        _print(msg)
+        return SsyncResult(
+            video=job.video,
+            job=job,
+            status="kept_original",
+            return_code=1,
+            message=msg,
+            kept_original_reason=str(kept_original_reason),
+        )
 
     retval = int(result.get("retval", 1))
     return SsyncResult(

@@ -1,6 +1,6 @@
 chardet
 charset_normalizer
-faust-cchardet;python_version<'3.13'
+faust-cchardet
 ffmpeg-python
 numpy>=1.12.0
 pysubs2>=1.2.0

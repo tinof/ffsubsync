@@ -42,11 +42,13 @@ jobs:
   pipx-installation:
     name: pipx Installation Test
     needs: code-quality  # Only run if code quality checks pass
+    # 3.14 is new; report it without failing the workflow.
+    continue-on-error: ${{ matrix.python-version == '3.14' }}
     strategy:
       fail-fast: false  # Continue testing other platforms if one fails
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13']
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -113,11 +115,14 @@ jobs:
   unit-tests:
     name: Unit Tests
     needs: code-quality
+    # 3.14 is new; report it without failing the workflow.
+    continue-on-error: ${{ matrix.python-version == '3.14' }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13']
+        # ubuntu-24.04-arm covers the ARM64 (aarch64) deployment target.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
     runs-on: ${{ matrix.os }}
 
     steps:

@@ -4,8 +4,8 @@
 repos:
   # Ruff linting and formatting - matches CI/CD pipeline
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    # Use the same version as in your CI/CD or latest stable
-    rev: v0.8.4
+    # Keep in step with the ruff version in uv.lock
+    rev: v0.16.8
     hooks:
       # Ruff linting check (matches: ruff check . --output-format=github)
       - id: ruff

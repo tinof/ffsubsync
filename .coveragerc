@@ -1,2 +1,2 @@
 [run]
-omit = ffsubsync/_version.py, ffsubsync/version.py
+omit = ffsubsync/version.py

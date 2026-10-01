@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+name: CI
 
 on:
   push:
@@ -7,40 +7,54 @@ on:
     branches: [ main, master, develop ]
   workflow_dispatch:  # Allows manual triggering from GitHub UI
 
+permissions:
+  contents: read
+
 # Cancel in-progress runs for the same workflow and branch
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Use only the checked-in resolution policy so ambient runner configuration cannot
+  # make uv.lock appear stale or alter dependency selection.
+  UV_CONFIG_FILE: uv.toml
+  # Supply-chain cool-off: only consider releases older than this.
+  UV_EXCLUDE_NEWER: "14 days"
+  # Keep in step with required-version in uv.toml.
+  UV_VERSION: "0.12.13"
+
 jobs:
-  # Code Quality Checks with Ruff
+  # Code Quality Checks (codespell and Ruff)
   code-quality:
-    name: Code Quality (Ruff)
+    name: Code Quality
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        # Actions are pinned to full commit SHAs; bump deliberately.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 1
+          fetch-depth: 0  # Full history needed for git-tag versioning
+          persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
-          python-version: '3.11'  # Use a stable Python version for linting
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          python-version: '3.13'
 
-      - name: Install pre-commit
-        run: |
-          python -m pip install --upgrade pip
-          pip install pre-commit
+      - name: Install dependencies
+        # --locked: install from uv.lock and fail if pyproject.toml made it stale.
+        run: uv sync --locked --all-groups --extra tenvad-onnx
 
-      - name: Run pre-commit hooks (repo-wide, push stage)
-        run: |
-          echo "Running pre-commit (push stage) checks..."
-          pre-commit run --all-files --hook-stage push
+      - name: Run linting
+        # Check-only mode so CI fails on unformatted code instead of fixing it.
+        run: uv run python devtools/lint.py --check
 
-  # pipx Installation Testing
-  pipx-installation:
-    name: pipx Installation Test
+  # Installation Testing: build the wheel and install it as a uv tool
+  install-test:
+    name: uv tool Installation Test
     needs: code-quality  # Only run if code quality checks pass
     # 3.14 is new; report it without failing the workflow.
     continue-on-error: ${{ matrix.python-version == '3.14' }}
@@ -48,68 +62,40 @@ jobs:
       fail-fast: false  # Continue testing other platforms if one fails
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        python-version: ['3.11', '3.12', '3.13', '3.14']
     runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0  # Full history needed for versioneer
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
           python-version: ${{ matrix.python-version }}
 
-      - name: Install pipx
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install pipx
-          python -m pipx ensurepath
-
       - name: Build package
-        run: |
-          python -m pip install build
-          python -m build
+        run: uv build
 
-      - name: Install package with pipx
+      - name: Install package with uv tool
         run: |
-          # Install from the built wheel
           WHEEL_FILE=$(find dist -name "*.whl" | head -n 1)
           echo "Installing wheel: $WHEEL_FILE"
-          pipx install "$WHEEL_FILE"
+          uv tool install "$WHEEL_FILE"
 
       - name: Verify CLI tools are available
         run: |
-          echo "Verifying ffsubsync CLI tools are installed and accessible..."
-
-          # Check that all three entry points are available
-          which ffsubsync
-          which ffs
-          which subsync
-
-          # Test basic functionality (help command should work without dependencies)
-          echo "Testing ffsubsync --help..."
-          ffsubsync --help
-
-          echo "Testing ffs --help..."
-          ffs --help
-
-          echo "Testing subsync --help..."
-          subsync --help
-
-      - name: Test CLI functionality
-        run: |
-          echo "Testing basic CLI functionality..."
-
-          # Test version command if available
-          if ffsubsync --version 2>/dev/null; then
-            echo "Version command works"
-          else
-            echo "Version command not available, testing help instead"
-            ffsubsync --help | head -5
-          fi
+          for cmd in ffsubsync ffs subsync ssync piecewise-sync; do
+            echo "Testing $cmd --help..."
+            which "$cmd"
+            "$cmd" --help > /dev/null
+          done
+          ffsubsync --version
 
   # Unit Tests (Linux and macOS only)
   unit-tests:
@@ -122,30 +108,28 @@ jobs:
       matrix:
         # ubuntu-24.04-arm covers the ARM64 (aarch64) deployment target.
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        python-version: ['3.11', '3.12', '3.13', '3.14']
     runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          # Single source of truth from pyproject extras
-          pip install -e ".[dev]"
+        run: uv sync --locked --all-groups --extra tenvad-onnx
 
       - name: Run unit tests
-        run: |
-          echo "Running unit tests..."
-          pytest -v -m 'not integration' tests/
+        run: uv run pytest -v -m 'not integration' tests/
 
   # Integration Tests (Ubuntu only, limited Python versions)
   integration-tests:
@@ -154,27 +138,26 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.10', '3.11']  # Limited to reduce CI time
+        python-version: ['3.11', '3.12']  # Limited to reduce CI time
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+        run: uv sync --locked --all-groups --extra tenvad-onnx
 
       - name: Run integration tests
         env:
           INTEGRATION: 1
-        run: |
-          echo "Running integration tests..."
-          pytest -v -m 'integration' tests/
+        run: uv run pytest -v -m 'integration' tests/

@@ -1,10 +1,12 @@
 import os
+from importlib.metadata import PackageNotFoundError, version
 
-from ffsubsync._version import get_versions
 from ffsubsync.constants import SUBSYNC_RESOURCES_ENV_MAGIC
 
-__version__ = get_versions()["version"]
-del get_versions
+try:
+    __version__ = version("ffsubsync")
+except PackageNotFoundError:
+    __version__ = "unknown"
 
 
 def get_version():

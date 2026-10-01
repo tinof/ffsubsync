@@ -1,6 +1,9 @@
-[build-system]
-requires = ["setuptools>=61.0", "wheel", "versioneer[toml]==0.29"]
-build-backend = "setuptools.build_meta"
+# ---- Project Info and Dependencies ----
+
+[project.urls]
+Homepage = "https://github.com/smacke/ffsubsync"
+Repository = "https://github.com/tinof/ffsubsync"
+Issues = "https://github.com/tinof/ffsubsync/issues"
 
 [project]
 name = "ffsubsync"
@@ -23,16 +26,22 @@ classifiers = [
     "Natural Language :: English",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Multimedia :: Sound/Audio :: Analysis",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
     "Topic :: System :: Systems Administration",
     "Topic :: Utilities",
+    # This fork is installed from git and is not published to PyPI. This
+    # classifier makes PyPI reject an accidental upload.
+    "Private :: Do Not Upload",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
+
+# ---- Main dependencies ----
+
 dependencies = [
     "chardet",
     "charset_normalizer",
@@ -40,26 +49,14 @@ dependencies = [
     "ffmpeg-python",
     "numpy>=1.12.0",
     "pysubs2>=1.2.0",
+    "requests",
     "rich",
-    "setuptools",
     "srt>=3.0.0",
     "tqdm",
     "webrtcvad-wheels",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "black",
-    "flake8",
-    "mypy",
-    "pytest",
-    "pytest-cov",
-    "pyyaml",
-    "ruff",
-    "twine",
-    "types-requests",
-    "versioneer",
-]
 tenvad = [
     # TEN VAD Python bindings (requires 16 kHz input)
     # Install from git due to broken PyPI package (as per TEN-VAD official docs)
@@ -71,11 +68,27 @@ tenvad-onnx = [
     # Requires ONNX Runtime 1.17.1+ (officially supports ARM64 Linux)
     "onnxruntime>=1.17.1",
 ]
+whisper = [
+    "faster-whisper",
+]
 
-[project.urls]
-Homepage = "https://github.com/smacke/ffsubsync"
-Repository = "https://github.com/smacke/ffsubsync"
-Issues = "https://github.com/smacke/ffsubsync/issues"
+# ---- Dev dependencies ----
+
+[dependency-groups]
+build = [
+    "hatchling==1.31.0",
+    "uv-dynamic-versioning==0.14.0",
+]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "pytest-sugar",
+    "pyyaml",
+    "ruff",
+    "codespell",
+    "basedpyright",
+    "funlog",
+]
 
 [project.scripts]
 ffsubsync = "ffsubsync:main"
@@ -84,29 +97,45 @@ subsync = "ffsubsync:main"
 ssync = "ffsubsync.ssync:main"
 piecewise-sync = "ffsubsync.tools.piecewise_sync:main"
 
-[tool.setuptools]
-packages = ["ffsubsync", "ffsubsync.tools"]
-include-package-data = true
+# ---- Build system ----
 
-[tool.setuptools.package-data]
-ffsubsync = ["py.typed"]
+# Dynamic versioning from git tags:
+# https://github.com/ninoseki/uv-dynamic-versioning/
+[build-system]
+requires = ["hatchling==1.31.0", "uv-dynamic-versioning==0.14.0"]
+build-backend = "hatchling.build"
 
-[tool.versioneer]
-VCS = "git"
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.uv-dynamic-versioning]
+vcs = "git"
 style = "pep440"
-versionfile_source = "ffsubsync/_version.py"
-versionfile_build = "ffsubsync/_version.py"
-tag_prefix = ""
-parentdir_prefix = "ffsubsync-"
+bump = true
+# Recent tags have no "v" prefix (0.4.29); older ones do (v0.4.3).
+pattern = "default-unprefixed"
 
-[tool.black]
-line-length = 88
-target-version = ['py310']
-extend-exclude = '(^/versioneer|_version)\.py'
+[tool.hatch.metadata]
+# The tenvad extra is a git URL (the PyPI package is broken).
+allow-direct-references = true
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/ffsubsync",
+    "/tests",
+    "/HISTORY.rst",
+    "/uv.lock",
+]
+
+[tool.hatch.build.targets.wheel]
+# Flat layout (no src/), kept so merges from upstream stay clean.
+packages = ["ffsubsync"]
+
+# ---- Tool Settings ----
 
 [tool.ruff]
 line-length = 88
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 # Enable a comprehensive set of rules
@@ -129,15 +158,12 @@ ignore = [
     "B008",  # Allow function calls in argument defaults
 ]
 
-# Exclude the same files as Black and flake8
 exclude = [
     ".git",
     "__pycache__",
     "build",
     "dist",
     "docs",
-    "versioneer.py",
-    "ffsubsync/_version.py",
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -166,22 +192,18 @@ exclude = [
     "build",
     "dist",
     "docs",
-    "versioneer.py",
-    "ffsubsync/_version.py",
 ]
 
 [tool.basedpyright]
 # basedpyright powers the Claude Code LSP tool and serves as the CLI type-check step.
 # "standard" mode keeps real type errors visible without basedpyright's strictest noise.
 typeCheckingMode = "standard"
-pythonVersion = "3.10"
+pythonVersion = "3.11"
 exclude = [
     "**/__pycache__",
     "build",
     "dist",
     "docs",
-    "versioneer.py",
-    "ffsubsync/_version.py",
 ]
 # This codebase is partially typed and numpy-heavy; silence "unknown/any" churn so that
 # actionable diagnostics (e.g. None-comparison, operator misuse) stand out.
@@ -195,3 +217,13 @@ reportAny = false
 reportImplicitOverride = false
 reportImplicitStringConcatenation = false
 reportUnusedCallResult = false
+
+[tool.codespell]
+skip = "uv.lock,*.srt,*.json,*.onnx,./tests/data,./test-data,./docs"
+# ignore-words-list = "foo,bar"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: mark a test as an integration test.",
+]

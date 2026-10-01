@@ -25,3 +25,5 @@ ssync
 .opencode/
 .codex/
 .claude/
+.ruff_cache/
+.pytest_cache/

@@ -14,8 +14,13 @@ Supported platforms are Linux and macOS. Windows is not supported. The external
 `ffmpeg` and `ffprobe` binaries must be installed and available on `PATH` unless
 the user passes an explicit ffmpeg path.
 
-Python support starts at 3.10 (`requires-python = ">=3.10"`). Packaging uses
-setuptools and Versioneer.
+Python support starts at 3.11 (`requires-python = ">=3.11"`). The project is
+managed with uv and follows the simple-modern-uv template (flat `ffsubsync/`
+layout kept, not Copier-managed). The build backend is hatchling; the version
+comes from git tags through uv-dynamic-versioning (tags may or may not have a
+`v` prefix), and `ffsubsync/version.py` reads it from the installed package
+metadata. `uv.lock` is committed, and `uv.toml` sets a 14-day `exclude-newer`
+cool-off. This fork is not published to PyPI.
 
 ## CLI Entry Points
 
@@ -107,75 +112,65 @@ setuptools and Versioneer.
   `--ai` excludes `--piecewise` and `--ai-fallback`. The judge is injected
   (`main(..., judge=...)`, `execute_job(..., judge=...)`) like the executor.
 
-On this Ubuntu machine, prior local deployment used a `pipxu` managed install and
-`/home/ubuntu/bin/ssync` is a user-facing wrapper. If the user asks to install or
-refresh the command they actually run, verify `ssync` from outside the checkout
-so imports do not accidentally come from the repo.
+On this Ubuntu machine the commands are an editable uv tool install of this
+checkout (`uv tool install --editable /home/ubuntu/ffsubsync --with onnxruntime`,
+commands in `~/.local/bin`), so code changes are live at once. Run the install
+again with `--force` after a change to dependencies or entry points. If the user
+asks to install or refresh the command they actually run, verify `ssync` from
+outside the checkout.
 
 ## Development Commands
 
-Install the project for local development:
+Install the project and all development dependencies into `.venv`:
 
 ```bash
-pip install -e ".[dev]"
+make install        # uv sync --all-groups --extra tenvad-onnx
 ```
 
-Alternative legacy setup:
+Lint and format (codespell, ruff check, ruff format):
 
 ```bash
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
-pip install -e .
-```
-
-Install hooks:
-
-```bash
-pip install pre-commit
-pre-commit install
-```
-
-Lint and format:
-
-```bash
-ruff check .
-ruff check . --fix
-ruff format .
-ruff format --check .
-pre-commit run --all-files
-pre-commit run --all-files --hook-stage push
+make lint           # fixes files
+make lint-check     # check only, same as CI
+uv run ruff check .
+uv run ruff format --check .
 ```
 
 Tests:
 
 ```bash
-pytest -v -m 'not integration' tests/
-pytest -v tests/
-pytest --cov-config=.coveragerc --cov=ffsubsync tests/
-INTEGRATION=1 pytest -v -m 'integration' tests/
+make test                       # uv run pytest -m 'not integration'
+uv run pytest -v tests/
+uv run pytest --cov-config=.coveragerc --cov=ffsubsync tests/
+make test-integration           # INTEGRATION=1 uv run pytest -m integration
 ```
 
-Type checking:
+Type checking (basedpyright, not a CI gate; the legacy code has known errors):
 
 ```bash
-mypy ffsubsync
-```
-
-Legacy Make targets still exist:
-
-```bash
-make clean
-make lint
 make typecheck
 ```
+
+Dependencies and builds:
+
+```bash
+uv add <name>           # runtime dependency
+uv add --dev <name>     # development dependency
+make upgrade            # upgrade the lock file
+make build              # sdist and wheel in dist/
+```
+
+After a dependency change, commit `uv.lock`; CI installs with `uv sync --locked`.
+The `tenvad` extra is a git dependency without Linux ARM64 support, so do not
+use `--all-extras` on this machine.
 
 Use focused commands while developing. Examples:
 
 ```bash
 uv run pytest -q tests/test_ssync.py
 uv run pytest -q tests/test_misc.py
-ruff check ffsubsync/ssync.py tests/test_ssync.py
-ruff format --check ffsubsync/ssync.py tests/test_ssync.py
+uv run ruff check ffsubsync/ssync.py tests/test_ssync.py
+uv run ruff format --check ffsubsync/ssync.py tests/test_ssync.py
 ```
 
 ## Core Algorithm
@@ -280,9 +275,9 @@ Supported explicit VAD choices include:
 TEN-VAD requires 16 kHz audio; the code adjusts frame rate automatically for
 TEN-VAD modes. Optional extras:
 
-- `pip install ffsubsync[tenvad]`: native TEN-VAD. Linux x64 and macOS.
-- `pip install ffsubsync[tenvad-onnx]`: ONNX Runtime backend, including Linux
-  ARM64 support.
+- `tenvad`: native TEN-VAD. Linux x64 and macOS.
+- `tenvad-onnx`: ONNX Runtime backend, including Linux ARM64 support.
+- `whisper`: faster-whisper, for `--vad whisper`.
 
 If native `ten-vad` import fails, the code attempts the ONNX backend before
 falling back to WebRTC.
@@ -318,12 +313,11 @@ function.
 Ruff is the formatter and linter. Configuration is in `pyproject.toml`:
 
 - line length: 88
-- target: Python 3.10
+- target: Python 3.11
 - selected lint families: `E`, `W`, `F`, `I`, `B`, `C4`, `UP`, `SIM`, `RUF`
 - notable ignores: `E501`, `E722`, `B008`
 
-Black and flake8 remain in development dependencies for legacy workflows, but
-Ruff is authoritative for current formatting and linting.
+codespell checks spelling. `devtools/lint.py` runs codespell and Ruff together.
 
 Type hints are preferred, but the codebase is only partially typed and uses
 numpy heavily. Do not introduce broad type-only refactors unless needed for the
@@ -360,12 +354,12 @@ Debugging sync failures:
 
 ## CI
 
-GitHub Actions runs:
+GitHub Actions calls uv directly (`uv sync --locked`, pinned action SHAs):
 
-1. Ruff and pre-commit quality checks on Ubuntu with Python 3.11.
-2. pipx installation checks on Ubuntu and macOS for Python 3.10 through 3.13.
-3. Unit tests on Ubuntu and macOS for Python 3.10 through 3.13.
-4. Integration tests on Ubuntu for Python 3.10 and 3.11.
+1. codespell and Ruff (`devtools/lint.py --check`) on Ubuntu.
+2. `uv tool install` of the built wheel on Ubuntu and macOS for Python 3.11
+   through 3.14, with `--help` for all five commands, including `ssync`.
+3. Unit tests on Ubuntu x64, Ubuntu ARM64 and macOS for Python 3.11 through 3.14.
+4. Integration tests on Ubuntu for Python 3.11 and 3.12.
 
-CI verifies `ffsubsync`, `ffs`, and `subsync` help output in the pipx job. It
-does not currently verify `ssync` there, so local `ssync` workflow tests matter.
+Python 3.14 jobs do not fail the workflow.

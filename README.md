@@ -3,8 +3,8 @@ FFsubsync
 
 [![CI Status](https://github.com/smacke/ffsubsync/workflows/ffsubsync/badge.svg)](https://github.com/smacke/ffsubsync/actions)
 [![Support Ukraine](https://badgen.net/badge/support/UKRAINE/?color=0057B8&labelColor=FFD700)](https://github.com/vshymanskyy/StandWithUkraine/blob/main/docs/README.md)
-[![Checked with mypy](http://www.mypy-lang.org/static/mypy_badge.svg)](http://mypy-lang.org/)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![License: MIT](https://img.shields.io/badge/License-MIT-maroon.svg)](https://opensource.org/licenses/MIT)
 [![Python Versions](https://img.shields.io/pypi/pyversions/ffsubsync.svg)](https://pypi.org/project/ffsubsync)
 [![Documentation Status](https://readthedocs.org/projects/ffsubsync/badge/?version=latest)](https://ffsubsync.readthedocs.io/en/latest/?badge=latest)
@@ -174,59 +174,63 @@ sudo apt install ffmpeg
 sudo dnf install ffmpeg
 ~~~
 
-### Recommended Installation (pipx)
+### Recommended Installation (uv)
 
-The recommended way to install ffsubsync is using [pipx](https://pypa.github.io/pipx/), which installs the package in an isolated environment and makes the CLI commands globally available.
+The recommended way to install ffsubsync is with [uv](https://docs.astral.sh/uv/getting-started/installation/). `uv tool install` puts the package in an isolated environment and makes the CLI commands globally available.
 
 **ARM64/aarch64 (ONNX backend — all platforms):**
 
 ~~~
-pipx install "ffsubsync[tenvad-onnx] @ git+https://github.com/tinof/ffsubsync@LATEST"
+uv tool install "ffsubsync[tenvad-onnx] @ git+https://github.com/tinof/ffsubsync@LATEST"
 ~~~
 
 **Linux x64 / macOS (native TEN VAD — best performance):**
 
 ~~~
-pipx install "ffsubsync[tenvad] @ git+https://github.com/tinof/ffsubsync@LATEST"
+uv tool install "ffsubsync[tenvad] @ git+https://github.com/tinof/ffsubsync@LATEST"
 ~~~
 
 **WebRTC only (no TEN VAD):**
 
 ~~~
-pipx install "git+https://github.com/tinof/ffsubsync.git"
+uv tool install "git+https://github.com/tinof/ffsubsync.git"
 ~~~
 
 **Development head (master branch):**
 
 ~~~
-pipx install 'git+https://github.com/tinof/ffsubsync@master#egg=ffsubsync[tenvad-onnx]'
+uv tool install "ffsubsync[tenvad-onnx] @ git+https://github.com/tinof/ffsubsync@master"
 ~~~
 
-If you already installed without the extra, you can add TEN VAD later:
+If you already installed without the extra, install again with the TEN VAD package added:
 
 ~~~
 # ARM64:
-pipx inject ffsubsync onnxruntime
+uv tool install --force --with onnxruntime "git+https://github.com/tinof/ffsubsync.git"
 
 # Linux x64 / macOS:
-pipx inject ffsubsync 'ten-vad'
+uv tool install --force --with "ten-vad @ git+https://github.com/TEN-framework/ten-vad.git" "git+https://github.com/tinof/ffsubsync.git"
 ~~~
 
-### Alternative Installation (pip)
+To update later, run `uv tool upgrade ffsubsync`. To remove it, run `uv tool uninstall ffsubsync`.
+
+### Alternative Installation (from a checkout)
 
 ~~~bash
 git clone https://github.com/tinof/ffsubsync.git
 cd ffsubsync
 
 # ARM64 systems
-pip install ".[tenvad-onnx]"
+uv tool install ".[tenvad-onnx]"
 
 # Linux x64 / macOS
-pip install ".[tenvad]"
+uv tool install ".[tenvad]"
 
 # WebRTC only
-pip install .
+uv tool install .
 ~~~
+
+`pip install` and `pipx install` accept the same package specifiers if you do not use uv.
 
 > **Note on TEN VAD wheels**: on Debian/Ubuntu you may need `sudo apt install libc++1`. If `ten-vad` fails to build on your platform, install without the extra (defaults to WebRTC VAD) or use the ONNX backend instead.
 
@@ -296,7 +300,7 @@ Windows is not supported. The tool requires Unix-like systems.
 
 Requirements
 ------------
-- **Python:** 3.10 or higher
+- **Python:** 3.11 or higher
 - **ffmpeg:** Must be installed and available in your system PATH
 - **Dependencies:** All Python dependencies are installed automatically
 

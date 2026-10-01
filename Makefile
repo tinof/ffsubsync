@@ -1,41 +1,56 @@
-# -*- coding: utf-8 -*-
-.PHONY: clean build bump deploy black blackcheck check test tests deps devdeps
+# Makefile for easy development workflows.
+# See DEVELOPMENT.md for docs.
+# Note GitHub Actions call uv directly, not this Makefile.
 
-clean:
-	rm -rf dist/ build/ *.egg-info/
+.DEFAULT_GOAL := default
 
-build: clean
-	python setup.py sdist bdist_wheel --universal
+# Use only the checked-in project configuration. Otherwise uv merges user- and
+# system-level settings into uv.lock, which can make it fail on another machine.
+UV_CONFIG_FILE := $(CURDIR)/uv.toml
+export UV_CONFIG_FILE
 
-bump:
-	./scripts/bump-version.py
+# Safe default for every dependency resolution invoked through this Makefile.
+UV_EXCLUDE_NEWER ?= 14 days
+export UV_EXCLUDE_NEWER
 
-deploy: build
-	./scripts/deploy.sh
+# The tenvad extra is a git dependency without Linux ARM64 support, so it is
+# not installed by default.
+SYNC_ARGS := --all-groups --extra tenvad-onnx
 
-black:
-	./scripts/blacken.sh
+.PHONY: default install lint lint-check typecheck test test-integration upgrade build clean
 
-blackcheck:
-	./scripts/blacken.sh --check
+default: install lint test
+
+install:
+	uv sync $(SYNC_ARGS)
 
 lint:
-	flake8
+	uv run python devtools/lint.py
+
+# Check-only lint, matching CI (does not modify files).
+lint-check:
+	uv run python devtools/lint.py --check
 
 typecheck:
-	mypy ffsubsync
+	uv run basedpyright ffsubsync
 
-check_no_typing:
-	INTEGRATION=1 pytest --cov-config=.coveragerc --cov=ffsubsync
+test:
+	uv run pytest -m 'not integration'
 
-check: blackcheck typecheck check_no_typing
+test-integration:
+	INTEGRATION=1 uv run pytest -m integration
 
-test: check
-tests: check
+upgrade:
+	uv sync --upgrade $(SYNC_ARGS)
 
-deps:
-	pip install -r requirements.txt
+build: install
+	uv build --no-build-isolation
 
-devdeps:
-	pip install -e .
-	pip install -r requirements-dev.txt
+clean:
+	-rm -rf dist/
+	-rm -rf build/
+	-rm -rf *.egg-info/
+	-rm -rf .pytest_cache/
+	-rm -rf .ruff_cache/
+	-rm -rf .venv/
+	-find . -type d -name "__pycache__" -exec rm -rf {} +

@@ -88,6 +88,24 @@ setuptools and Versioneer.
   reference (the extracted `.srt` is the reference). Drift mode cannot fix a
   jump larger than `DEFAULT_MAX_RESIDUAL_OFFSET_SECONDS` (15 s); split mode
   searches +-`--max-offset-seconds` around the global offset.
+- `--ai` is for a subtitle made for another cut of the video (added scenes, many
+  forward jumps). `_execute_ai_job()` extracts an embedded **text** stream
+  (`_pick_ai_reference_stream()`; PGS or no stream -> `skipped`), runs
+  `cut_aligner.compute_cut_offsets()`, sends the cues of
+  `cut_aligner.review_windows()` to the judge, turns its matches into anchors
+  (`ai_judge.anchors_from_matches()`), re-runs the aligner (at most
+  `AI_MAX_JUDGE_ROUNDS`), and applies the offsets with `VariableSubtitleShifter`.
+  It does not call the engine. The gate is `score_per_cue <
+  AI_MIN_SCORE_PER_CUE` -> `kept_original`, exit code 1. `--ai-no-judge` skips
+  Claude, and so does a first alignment below the gate. `--ai-fallback` runs
+  AI mode after the normal sync ends `failed` or `kept_original`, or ends
+  `synced` with `_embedded_agreement()` below `AI_FALLBACK_MIN_AGREEMENT` (the
+  engine's gate passes some wrong framerate scales). `execute_job()` restores
+  the original bytes first, because the engine writes in place, and puts the
+  engine's output back when AI mode does not sync.
+  `--ai-model`, `--ai-timeout` and `--ai-budget-usd` go to the `claude` call.
+  `--ai` excludes `--piecewise` and `--ai-fallback`. The judge is injected
+  (`main(..., judge=...)`, `execute_job(..., judge=...)`) like the executor.
 
 On this Ubuntu machine, prior local deployment used a `pipxu` managed install and
 `/home/ubuntu/bin/ssync` is a user-facing wrapper. If the user asks to install or
@@ -207,6 +225,17 @@ physical ratio.
   offset and keeps the scale with the best DP objective; `VariableSubtitleShifter`
   applies the result. Upstream's default penalty (5 s) splits correct files
   against a real VAD reference; the fork's default is 30 s (see `constants.py`).
+- `ffsubsync/cut_aligner.py`: cut-aware aligner behind `ssync --ai`. Works on
+  cue timings of the subtitle and of a reference *text* track. The score is a
+  kernel around reference cue starts plus a small overlap term; the Viterbi
+  path may stay, jump forward (`jump_penalty`), or step back at most
+  `max_back_step`. `anchors` restrict a cue to +-2.5 s around a known offset.
+  `is_dialogue_text()` drops SDH sound descriptions. Overlap-only scoring (as
+  in `split_aligner`) fails on this problem; do not replace the start kernel.
+- `ffsubsync/ai_judge.py`: prompt building, the headless `claude -p` call
+  (`--tools ""`, `--setting-sources ""`, `--json-schema`, answer in
+  `structured_output`), and validation of the returned matches. Claude returns
+  cue pairs, never offsets. Every failure raises `JudgeUnavailable`.
 - `ffsubsync/ten_vad_onnx.py` and `ffsubsync/onnx_models/`: ONNX TEN-VAD
   compatibility backend.
 - `ffsubsync/tools/piecewise_sync.py`: standalone tool for progressive mid-file
@@ -275,6 +304,9 @@ Test files by area:
   selection.
 - `tests/test_tenvad_backend.py`: TEN-VAD backend selection and fallback.
 - `tests/test_subtitles.py`: subtitle parsing and transformations.
+- `tests/test_cut_aligner.py`, `tests/test_ai_judge.py`: AI mode. The regression
+  fixture `tests/data/cut_blue_lights_s01e02.json` holds cue timings only.
+  Claude is never called in tests; inject a fake judge or runner.
 - `tests/test_integration.py`: integration scenarios gated by `INTEGRATION=1`.
 
 For changes to `ssync`, prefer tests against pure workflow functions and an

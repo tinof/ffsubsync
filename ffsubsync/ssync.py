@@ -7,10 +7,28 @@ import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Literal
 
+from ffsubsync.ai_judge import (
+    DEFAULT_BUDGET_USD,
+    DEFAULT_TIMEOUT_SECONDS,
+    Judge,
+    JudgeCue,
+    JudgeUnavailable,
+    anchors_from_matches,
+    build_prompts,
+    run_claude,
+)
 from ffsubsync.constants import DEFAULT_SPLIT_PENALTY_SECONDS
+from ffsubsync.cut_aligner import (
+    assess_cut_alignment,
+    compute_cut_offsets,
+    default_offset_range,
+    is_dialogue_text,
+    review_windows,
+)
 from ffsubsync.ffsubsync import make_parser, run
 
 DEFAULT_SUB_LANG = "fin"
@@ -18,6 +36,17 @@ SUBTITLE_EXT = "srt"
 SUB_EXT = "sub"
 DEFAULT_FALLBACK_LANG = "en"
 DEFAULT_PIECEWISE_WINDOW_MS = 60000
+# AI mode keeps the original when the aligner's score per cue is below this.
+# Measured on one real episode: 1.4 for the matching subtitle, 0.7 to 0.9 for
+# the same cues with shuffled or rescaled timings. The share of cues near a
+# reference cue start separates them less well (0.83 against 0.6 to 0.7).
+AI_MIN_SCORE_PER_CUE = 1.1
+# --ai-fallback distrusts a normal sync when fewer of its cues than this start
+# within half a second of an embedded dialogue cue (about 0.8 for a good sync of
+# a translation, 0.25 by chance).
+AI_FALLBACK_MIN_AGREEMENT = 0.5
+AI_MIN_REFERENCE_CUES = 10
+AI_MAX_JUDGE_ROUNDS = 2
 VAD_CHOICES = (
     "subs_then_webrtc",
     "webrtc",
@@ -90,6 +119,22 @@ class SyncTuning:
 
 
 @dataclass(frozen=True)
+class AiOptions:
+    """AI mode: cut-aware alignment against an embedded text track, with Claude
+    judging the doubtful stretches.
+    """
+
+    enabled: bool = False
+    # Run AI mode when the normal sync fails or keeps the original.
+    fallback: bool = False
+    # False: cut-aware aligner only, Claude is never called.
+    judge: bool = True
+    model: str | None = None
+    timeout: float = DEFAULT_TIMEOUT_SECONDS
+    budget_usd: float = DEFAULT_BUDGET_USD
+
+
+@dataclass(frozen=True)
 class SsyncOptions:
     input_path: Path
     lang: str
@@ -100,6 +145,7 @@ class SsyncOptions:
     tuning: SyncTuning = field(default_factory=SyncTuning)
     piecewise: bool = False
     piecewise_window: int = DEFAULT_PIECEWISE_WINDOW_MS
+    ai: AiOptions = field(default_factory=AiOptions)
 
 
 @dataclass(frozen=True)
@@ -114,6 +160,7 @@ class SsyncJob:
     tuning: SyncTuning = field(default_factory=SyncTuning)
     piecewise: bool = False
     piecewise_window: int = DEFAULT_PIECEWISE_WINDOW_MS
+    ai: AiOptions = field(default_factory=AiOptions)
 
 
 @dataclass(frozen=True)
@@ -265,6 +312,48 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Correction window in milliseconds for the embedded-reference "
         f"piecewise path (default: {DEFAULT_PIECEWISE_WINDOW_MS})",
     )
+
+    ai = parser.add_argument_group(
+        "AI mode",
+        "For a subtitle made for another cut of the video (added or removed "
+        "scenes). Needs an embedded text subtitle in the video as reference. "
+        "The text of the doubtful stretches is sent to Claude through the "
+        "local 'claude' CLI.",
+    )
+    ai.add_argument(
+        "--ai",
+        action="store_true",
+        help="Align cue by cue against the embedded text subtitle and let "
+        "Claude check the doubtful stretches",
+    )
+    ai.add_argument(
+        "--ai-fallback",
+        action="store_true",
+        help="Run AI mode only when the normal sync fails or keeps the original",
+    )
+    ai.add_argument(
+        "--ai-no-judge",
+        dest="ai_judge",
+        action="store_false",
+        help="AI mode without Claude: the cut-aware aligner alone",
+    )
+    ai.add_argument(
+        "--ai-model",
+        default=None,
+        help="Model for the claude CLI (default: the CLI's own default)",
+    )
+    ai.add_argument(
+        "--ai-timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        help=f"Seconds to wait for one Claude call (default: {DEFAULT_TIMEOUT_SECONDS:g})",
+    )
+    ai.add_argument(
+        "--ai-budget-usd",
+        type=float,
+        default=DEFAULT_BUDGET_USD,
+        help=f"Spending cap for one Claude call (default: {DEFAULT_BUDGET_USD:g})",
+    )
     return parser
 
 
@@ -273,6 +362,10 @@ def parse_options(argv: Sequence[str] | None = None) -> SsyncOptions:
     args = parser.parse_args(argv)
 
     reference_source: ReferenceSource = args.reference_source or "audio"
+    if args.ai and args.piecewise:
+        parser.error("--ai cannot be combined with --piecewise")
+    if args.ai and args.ai_fallback:
+        parser.error("--ai and --ai-fallback are alternatives; give one")
 
     return SsyncOptions(
         input_path=Path(args.video),
@@ -296,6 +389,14 @@ def parse_options(argv: Sequence[str] | None = None) -> SsyncOptions:
         ),
         piecewise=args.piecewise,
         piecewise_window=args.piecewise_window,
+        ai=AiOptions(
+            enabled=args.ai,
+            fallback=args.ai_fallback,
+            judge=args.ai_judge,
+            model=args.ai_model,
+            timeout=args.ai_timeout,
+            budget_usd=args.ai_budget_usd,
+        ),
     )
 
 
@@ -563,6 +664,7 @@ def resolve_jobs(
                 tuning=options.tuning,
                 piecewise=options.piecewise,
                 piecewise_window=options.piecewise_window,
+                ai=options.ai,
             )
         )
 
@@ -726,7 +828,28 @@ def build_sync_args(request: SsyncSyncRequest) -> argparse.Namespace:
     return args
 
 
+def _dry_run_ai(job: SsyncJob) -> None:
+    judge = "Claude judge" if job.ai.judge else "no judge"
+    when = "AI" if job.ai.enabled else "AI fallback"
+    stream = _pick_ai_reference_stream(job)
+    if stream is None:
+        _print(f"Mode: {when} ({judge}); no embedded text subtitle, would skip")
+    else:
+        _print(
+            f"Mode: {when} ({judge}), embedded text subtitle stream "
+            f"#{stream.get('index')} ({_stream_language(stream) or 'unknown'})"
+        )
+
+
 def _dry_run_job(job: SsyncJob) -> SsyncResult:
+    if job.ai.enabled or job.ai.fallback:
+        _dry_run_ai(job)
+    if job.ai.enabled:
+        _print(f"Quality gate: {'on' if job.tuning.quality_gate else 'off'}")
+        _print(f"Reference video: {job.video}")
+        _print(f"Input subtitle: {job.subtitle}")
+        _print(f"Output subtitle: {job.output}")
+        return SsyncResult(video=job.video, job=job, status="dry_run")
     if job.piecewise:
         if job.tuning.piecewise_mode == "split":
             _print(
@@ -817,10 +940,249 @@ def _execute_piecewise_job(
     )
 
 
+def _pick_ai_reference_stream(job: SsyncJob) -> dict[str, object] | None:
+    """The embedded text stream AI mode reads, or None. PGS has no text."""
+    text_streams = [
+        s for s in _embedded_subtitle_streams(job.video) if _is_text_subtitle_stream(s)
+    ]
+    return _pick_reference_subtitle_stream(text_streams, job.lang)
+
+
+def _clock(seconds: float) -> str:
+    return f"{int(seconds) // 60:02d}:{int(seconds) % 60:02d}"
+
+
+def _parse_subtitle_file(path: Path) -> Any:
+    from ffsubsync.subtitle_parser import make_subtitle_parser
+
+    fmt = path.suffix[1:].lower() or SUBTITLE_EXT
+    return make_subtitle_parser(fmt=fmt, caching=True).fit_transform(str(path))
+
+
+def _embedded_agreement(job: SsyncJob) -> float | None:
+    """Share of the written cues that start on an embedded dialogue cue.
+
+    Compares ``job.output`` as it is, with no alignment, against the embedded
+    text subtitle. None when the video has no usable one.
+    """
+    stream = _pick_ai_reference_stream(job)
+    if stream is None:
+        return None
+    with tempfile.TemporaryDirectory(prefix="ffsubsync-ssync-ai-") as temp_name:
+        reference = _extract_embedded_reference_subtitle(
+            job.video, stream, Path(temp_name)
+        )
+        if reference is None:
+            return None
+        ref_times = [
+            (c.start.total_seconds(), c.end.total_seconds())
+            for c in _parse_subtitle_file(reference)
+            if is_dialogue_text(c.content)
+        ]
+    sub_times = [
+        (c.start.total_seconds(), c.end.total_seconds())
+        for c in _parse_subtitle_file(job.output)
+    ]
+    if len(ref_times) < AI_MIN_REFERENCE_CUES or not sub_times:
+        return None
+    assessment = assess_cut_alignment(sub_times, ref_times, [0.0] * len(sub_times))
+    return assessment.within_half_second
+
+
+def _claude_judge(job: SsyncJob, temp_dir: Path) -> Judge:
+    def judge(prompt: str) -> Sequence[Mapping[str, Any]]:
+        return run_claude(
+            prompt,
+            model=job.ai.model,
+            timeout=job.ai.timeout,
+            budget_usd=job.ai.budget_usd,
+            # An empty directory: no project instructions reach the judge.
+            cwd=temp_dir,
+        )
+
+    return judge
+
+
+def _execute_ai_job(job: SsyncJob, judge: Judge | None = None) -> SsyncResult:
+    """Cut-aware sync against an embedded text subtitle, with a Claude judge.
+
+    ``judge`` takes a prompt and returns the matches (see ffsubsync.ai_judge);
+    the default asks the local ``claude`` CLI.
+    """
+    from ffsubsync.generic_subtitles import GenericSubtitle
+    from ffsubsync.subtitle_transformers import VariableSubtitleShifter
+
+    stream = _pick_ai_reference_stream(job)
+    if stream is None:
+        return _skipped(
+            job,
+            f"No embedded text subtitle in {job.video.name}; AI mode needs one "
+            "as reference. Skipping.",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="ffsubsync-ssync-ai-") as temp_name:
+        temp_dir = Path(temp_name)
+        reference = _extract_embedded_reference_subtitle(job.video, stream, temp_dir)
+        if reference is None:
+            return _skipped(
+                job,
+                f"Embedded subtitle stream #{stream.get('index')} could not be "
+                "extracted; AI mode needs a subtitle reference. Skipping.",
+            )
+        _print(
+            f"AI-syncing subtitles for {job.video.name} using embedded subtitle "
+            f"stream #{stream.get('index')} as reference"
+        )
+
+        subs = _parse_subtitle_file(job.subtitle)
+        ref_cues = [
+            JudgeCue(c.start.total_seconds(), c.end.total_seconds(), c.content)
+            for c in _parse_subtitle_file(reference)
+            if is_dialogue_text(c.content)
+        ]
+        sub_cues = [
+            JudgeCue(c.start.total_seconds(), c.end.total_seconds(), c.content)
+            for c in subs
+        ]
+        if len(ref_cues) < AI_MIN_REFERENCE_CUES or not sub_cues:
+            return _skipped(
+                job,
+                f"Embedded subtitle stream #{stream.get('index')} has too little "
+                "dialogue to align against. Skipping.",
+            )
+
+        sub_times = [(c.start, c.end) for c in sub_cues]
+        ref_times = [(c.start, c.end) for c in ref_cues]
+        min_offset, max_offset = default_offset_range(sub_times, ref_times)
+        if job.tuning.max_offset_seconds is not None:
+            min_offset = min(min_offset, -job.tuning.max_offset_seconds)
+            max_offset = max(max_offset, job.tuning.max_offset_seconds)
+
+        def align(anchors: Mapping[int, float]) -> Any:
+            return compute_cut_offsets(
+                sub_times,
+                ref_times,
+                min_offset=min_offset,
+                max_offset=max_offset,
+                anchors=anchors,
+            )
+
+        anchors: dict[int, float] = {}
+        alignment = align(anchors)
+        judge_note = "judge off"
+        # A fit this poor is rejected below whatever the judge says: do not ask.
+        hopeless = (
+            job.tuning.quality_gate and alignment.score_per_cue < AI_MIN_SCORE_PER_CUE
+        )
+        if job.ai.judge and not hopeless:
+            ask = judge if judge is not None else _claude_judge(job, temp_dir)
+            reviewed: set[int] = set()
+            judge_note = "no stretch needed the judge"
+            try:
+                for _ in range(AI_MAX_JUDGE_ROUNDS):
+                    windows = [
+                        w
+                        for w in review_windows(alignment)
+                        if not set(range(w[0], w[1] + 1)) <= reviewed
+                    ]
+                    if not windows:
+                        break
+                    matches: list[Mapping[str, Any]] = []
+                    for prompt in build_prompts(
+                        windows, sub_cues, ref_cues, alignment.offsets
+                    ):
+                        matches.extend(ask(prompt))
+                    for first, last in windows:
+                        reviewed.update(range(first, last + 1))
+                    new = anchors_from_matches(
+                        matches,
+                        windows,
+                        sub_cues,
+                        ref_cues,
+                        alignment.offsets,
+                        min_offset=min_offset,
+                        max_offset=max_offset,
+                    )
+                    anchors.update(new)
+                    judge_note = (
+                        f"Claude checked {len(reviewed)} cues, {len(anchors)} anchored"
+                    )
+                    previous = alignment.offsets
+                    alignment = align(anchors)
+                    if alignment.offsets == previous:
+                        break
+            except JudgeUnavailable as e:
+                judge_note = f"judge unavailable ({e}); aligner only"
+                alignment = align(anchors)
+
+    offsets = alignment.offsets
+    assessment = assess_cut_alignment(sub_times, ref_times, offsets)
+    jumps = sum(
+        1
+        for a, b in pairwise(alignment.segments)
+        if abs(b.offset_seconds - a.offset_seconds) >= 1.0
+    )
+    summary = (
+        f"{len(alignment.segments)} segment(s), {jumps} jump(s), offsets "
+        f"{min(offsets):+.2f}s to {max(offsets):+.2f}s; "
+        f"{assessment.within_half_second:.0%} of cues within 0.5s of a reference "
+        f"cue start, score {alignment.score_per_cue:.2f} per cue; {judge_note}"
+    )
+    if job.tuning.quality_gate and alignment.score_per_cue < AI_MIN_SCORE_PER_CUE:
+        reason = (
+            f"AI mode: the cues fit the embedded subtitle poorly (score "
+            f"{alignment.score_per_cue:.2f} per cue, {AI_MIN_SCORE_PER_CUE:g} needed)"
+        )
+        msg = f"Kept original subtitle for {job.video.name}: {reason}"
+        _print(msg)
+        return SsyncResult(
+            video=job.video,
+            job=job,
+            status="kept_original",
+            return_code=1,
+            message=msg,
+            kept_original_reason=reason,
+        )
+
+    shifted = list(VariableSubtitleShifter(offsets).fit_transform(subs))
+    for i in range(len(shifted) - 1):
+        # A step back between two cues that did not overlap before: end the
+        # first cue where the next one starts.
+        if (
+            shifted[i].end > shifted[i + 1].start >= shifted[i].start
+            and subs[i].end <= subs[i + 1].start
+        ):
+            shifted[i] = GenericSubtitle(
+                shifted[i].start, shifted[i + 1].start, shifted[i].inner
+            )
+    subs.clone_props_for_subs(shifted).set_encoding("same").write_file(str(job.output))
+
+    _print(f"AI sync: {summary}")
+    for seg in alignment.segments:
+        start = sub_times[seg.first][0] + seg.offset_seconds
+        _print(
+            f"  cues {seg.first + 1}-{seg.last + 1}: {seg.offset_seconds:+.2f}s "
+            f"(from {_clock(max(start, 0.0))})"
+        )
+    if assessment.uncovered:
+        stretches = ", ".join(
+            f"{_clock(start)}-{_clock(end)}" for start, end, _ in assessment.uncovered
+        )
+        _print(f"  reference dialogue without subtitles: {stretches}")
+    return SsyncResult(
+        video=job.video,
+        job=job,
+        status="synced",
+        return_code=0,
+        message=f"AI sync: {summary}",
+    )
+
+
 def execute_job(
     job: SsyncJob,
     executor: Callable[[argparse.Namespace], Mapping[str, Any]],
     converter: Callable[[Path, Path], bool] = _convert_sub_to_srt,
+    judge: Judge | None = None,
 ) -> SsyncResult:
     if job.candidate:
         if job.candidate.is_fallback:
@@ -845,6 +1207,47 @@ def execute_job(
                     message=msg,
                 )
 
+    if job.ai.enabled:
+        return _execute_ai_job(job, judge)
+
+    if not job.ai.fallback:
+        return _execute_standard_job(job, executor)
+
+    # AI mode must start from the original timings, and the engine writes in place.
+    original = job.subtitle.read_bytes()
+    result = _execute_standard_job(job, executor)
+    if result.status in ("kept_original", "failed"):
+        why = "Normal sync did not succeed"
+    elif result.status == "synced":
+        # The engine's own gate passes some wrong syncs, e.g. a subtitle of a
+        # shorter cut "fixed" with a framerate scale. The embedded text
+        # subtitle, when there is one, is an independent check.
+        agreement = _embedded_agreement(job)
+        if agreement is None or agreement >= AI_FALLBACK_MIN_AGREEMENT:
+            return result
+        why = (
+            f"Normal sync puts only {agreement:.0%} of cues on an embedded subtitle cue"
+        )
+    else:
+        return result
+
+    _print(f"{why} for {job.video.name}; trying AI mode")
+    written = job.output.read_bytes() if job.output.exists() else None
+    job.subtitle.write_bytes(original)
+    ai_result = _execute_ai_job(job, judge)
+    if ai_result.status == "synced":
+        return ai_result
+    if ai_result.skipped_reason:
+        _print(ai_result.skipped_reason)
+    if written is not None:
+        job.output.write_bytes(written)
+    return result
+
+
+def _execute_standard_job(
+    job: SsyncJob,
+    executor: Callable[[argparse.Namespace], Mapping[str, Any]],
+) -> SsyncResult:
     with tempfile.TemporaryDirectory(prefix="ffsubsync-ssync-") as temp_name:
         if job.piecewise and job.reference_source == "embedded":
             stream = _pick_reference_subtitle_stream(
@@ -913,6 +1316,7 @@ def execute_job(
 def main(
     argv: Sequence[str] | None = None,
     executor: Callable[[argparse.Namespace], Mapping[str, Any]] = run,
+    judge: Judge | None = None,
 ) -> int:
     options = parse_options(argv)
 
@@ -941,7 +1345,11 @@ def main(
             continue
 
         job = next(job for job in jobs if job.video == video)
-        result = _dry_run_job(job) if options.dry_run else execute_job(job, executor)
+        result = (
+            _dry_run_job(job)
+            if options.dry_run
+            else execute_job(job, executor, judge=judge)
+        )
         if result.status == "skipped" and result.skipped_reason:
             _print(result.skipped_reason)
         if result.return_code != 0:

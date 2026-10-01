@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from ffsubsync.ssync import (
     SsyncJob,
     SsyncOptions,
@@ -1209,3 +1211,348 @@ class TestPiecewiseTool:
 
         assert piecewise_main([str(reference), str(source), str(output)]) == 0
         assert "One" in output.read_text(encoding="utf-8-sig")
+
+
+AI_REFERENCE_LINES = [
+    "Check the pulse now.",
+    "Thanks, lads, one should pull through.",
+    "This is a disaster for all of us.",
+    "Where did you get it from this time?",
+    "It has all gone out already.",
+    "We can get some of it back.",
+    "I keep a record of the drops.",
+    "It is worth a try, I am saying.",
+    "Go back to all the dealers.",
+    "Tell them it is a bad batch.",
+    "Get back whatever you can.",
+    "You stick with me, kid.",
+    "So what happens now?",
+    "I am thinking about the girls.",
+    "That is my job, guess what.",
+    "And then they pay me monthly.",
+]
+
+
+def _srt(cues):
+    blocks = []
+    for n, (start, end, text) in enumerate(cues, start=1):
+
+        def stamp(t):
+            ms = round(t * 1000)
+            return (
+                f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:"
+                f"{ms // 1000 % 60:02d},{ms % 1000:03d}"
+            )
+
+        blocks.append(f"{n}\n{stamp(start)} --> {stamp(end)}\n{text}\n")
+    return "\n".join(blocks)
+
+
+def _make_ai_case(tmp_path, monkeypatch, *, streams=None):
+    """A subtitle of two scenes; the reference has 40 s added between them."""
+    video = tmp_path / "Show - S01E01.mkv"
+    video.touch()
+    subtitle = tmp_path / "Show - S01E01.fin.srt"
+    sub_cues = [(10.0 + 3.1 * i, 12.4 + 3.1 * i, f"rivi {i + 1}") for i in range(16)]
+    subtitle.write_text(_srt(sub_cues))
+    ref_cues = [
+        (start + (5.0 if i < 8 else 45.0), end + (5.0 if i < 8 else 45.0), text)
+        for i, ((start, end, _), text) in enumerate(
+            zip(sub_cues, AI_REFERENCE_LINES, strict=True)
+        )
+    ]
+    ref_cues.insert(8, (42.0, 44.0, "SIREN WAILS"))
+    if streams is None:
+        streams = [{"index": 2, "codec_name": "subrip", "tags": {"language": "eng"}}]
+    monkeypatch.setattr("ffsubsync.ssync._embedded_subtitle_streams", lambda _: streams)
+
+    def fake_extract(_, stream, temp_dir):
+        extracted = temp_dir / f"embedded-reference-{stream['index']}.srt"
+        extracted.write_text(_srt(ref_cues))
+        return extracted
+
+    monkeypatch.setattr(
+        "ffsubsync.ssync._extract_embedded_reference_subtitle", fake_extract
+    )
+    return video, subtitle
+
+
+def _cue_starts(path):
+    import srt
+
+    return [c.start.total_seconds() for c in srt.parse(path.read_text())]
+
+
+def _fail_executor(args):
+    raise AssertionError("AI mode must not call the sync engine")
+
+
+class TestAiMode:
+    def test_flags_are_parsed(self):
+        options = parse_options(
+            [
+                "ep.mkv",
+                "--ai",
+                "--ai-model",
+                "opus",
+                "--ai-timeout",
+                "60",
+                "--ai-budget-usd",
+                "0.5",
+            ]
+        )
+
+        assert options.ai.enabled is True
+        assert options.ai.fallback is False
+        assert options.ai.judge is True
+        assert options.ai.model == "opus"
+        assert options.ai.timeout == 60
+        assert options.ai.budget_usd == 0.5
+
+    def test_ai_is_off_by_default(self):
+        options = parse_options(["ep.mkv"])
+
+        assert options.ai.enabled is False
+        assert options.ai.fallback is False
+
+    @pytest.mark.parametrize(
+        "argv", [["--ai", "--piecewise"], ["--ai", "--ai-fallback"]]
+    )
+    def test_conflicting_flags_are_rejected(self, argv):
+        with pytest.raises(SystemExit):
+            parse_options(["ep.mkv", *argv])
+
+    def test_syncs_across_an_added_scene_and_consults_the_judge(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        video, subtitle = _make_ai_case(tmp_path, monkeypatch)
+        prompts = []
+
+        def judge(prompt):
+            prompts.append(prompt)
+            return []
+
+        code = main([str(video), "--ai"], executor=_fail_executor, judge=judge)
+
+        assert code == 0
+        starts = _cue_starts(subtitle)
+        assert starts[0] == pytest.approx(15.0, abs=0.05)
+        assert starts[7] == pytest.approx(10.0 + 3.1 * 7 + 5.0, abs=0.05)
+        assert starts[8] == pytest.approx(10.0 + 3.1 * 8 + 45.0, abs=0.05)
+        assert starts[15] == pytest.approx(10.0 + 3.1 * 15 + 45.0, abs=0.05)
+        assert len(prompts) == 1
+        # The cues around the jump, the reference text, and no sound description.
+        assert "S9 " in prompts[0] and "rivi 9" in prompts[0]
+        assert "Go back to all the dealers." in prompts[0]
+        assert "SIREN WAILS" not in prompts[0]
+        err = capsys.readouterr().err
+        assert "AI sync: 2 segment(s), 1 jump(s)" in err
+
+    def test_judge_matches_become_anchors(self, tmp_path, monkeypatch):
+        video, subtitle = _make_ai_case(tmp_path, monkeypatch)
+
+        def judge(prompt):
+            # Cues 7 and 8 already belong to the scene after the jump.
+            return [{"sub": 7, "ref": 9}, {"sub": 8, "ref": 10}]
+
+        main([str(video), "--ai"], executor=_fail_executor, judge=judge)
+
+        starts = _cue_starts(subtitle)
+        # R9/R10 are the dialogue cues at 79.8 s and 82.9 s.
+        assert starts[6] == pytest.approx(79.8, abs=0.05)
+        assert starts[7] == pytest.approx(82.9, abs=0.05)
+
+    def test_unavailable_judge_falls_back_to_the_aligner(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from ffsubsync.ai_judge import JudgeUnavailable
+
+        video, subtitle = _make_ai_case(tmp_path, monkeypatch)
+
+        def judge(prompt):
+            raise JudgeUnavailable("the 'claude' CLI is not on PATH")
+
+        code = main([str(video), "--ai"], executor=_fail_executor, judge=judge)
+
+        assert code == 0
+        assert _cue_starts(subtitle)[15] == pytest.approx(101.5, abs=0.05)
+        assert "judge unavailable" in capsys.readouterr().err
+
+    def test_no_judge_flag_never_asks(self, tmp_path, monkeypatch):
+        video, subtitle = _make_ai_case(tmp_path, monkeypatch)
+
+        def judge(prompt):
+            raise AssertionError("--ai-no-judge must not ask the judge")
+
+        code = main(
+            [str(video), "--ai", "--ai-no-judge"], executor=_fail_executor, judge=judge
+        )
+
+        assert code == 0
+        assert _cue_starts(subtitle)[0] == pytest.approx(15.0, abs=0.05)
+
+    def test_skips_without_an_embedded_text_stream(self, tmp_path, monkeypatch, capsys):
+        pgs = [{"index": 2, "codec_name": "hdmv_pgs_subtitle", "tags": {}}]
+        video, subtitle = _make_ai_case(tmp_path, monkeypatch, streams=pgs)
+        before = subtitle.read_text()
+
+        code = main([str(video), "--ai"], executor=_fail_executor)
+
+        assert code == 0
+        assert subtitle.read_text() == before
+        assert "AI mode needs one as reference" in capsys.readouterr().err
+
+    def test_gate_keeps_the_original_when_cues_do_not_match(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        video, subtitle = _make_ai_case(tmp_path, monkeypatch)
+        # An unrelated subtitle: irregular cue spacing that fits no reference cue.
+        gaps = [2.3, 4.9, 3.7, 6.1, 2.9, 5.3, 4.1, 7.7, 3.3, 5.9, 2.6, 6.8]
+        cues, t = [], 3.0
+        for i, gap in enumerate(gaps):
+            cues.append((t, t + 1.2, f"muu {i}"))
+            t += gap
+        subtitle.write_text(_srt(cues))
+        before = subtitle.read_text()
+
+        def judge(prompt):
+            raise AssertionError("a hopeless fit must not reach the judge")
+
+        code = main([str(video), "--ai"], executor=_fail_executor, judge=judge)
+
+        assert code == 1
+        assert subtitle.read_text() == before
+        assert "Kept original subtitle" in capsys.readouterr().err
+
+    def test_dry_run_names_the_stream_and_asks_nobody(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        video, _ = _make_ai_case(tmp_path, monkeypatch)
+
+        main([str(video), "--ai", "--dry-run"], executor=_fail_executor)
+
+        err = capsys.readouterr().err
+        assert "Mode: AI (Claude judge), embedded text subtitle stream #2 (eng)" in err
+
+
+class TestAiFallback:
+    def test_runs_after_the_engine_keeps_the_original(self, tmp_path, monkeypatch):
+        video, subtitle = _make_ai_case(tmp_path, monkeypatch)
+
+        def executor(args):
+            return {"retval": 0, "kept_original_reason": "offset too large"}
+
+        code = main(
+            [str(video), "--ai-fallback"], executor=executor, judge=lambda p: []
+        )
+
+        assert code == 0
+        assert _cue_starts(subtitle)[15] == pytest.approx(101.5, abs=0.05)
+
+    def test_runs_after_the_engine_fails(self, tmp_path, monkeypatch):
+        video, subtitle = _make_ai_case(tmp_path, monkeypatch)
+
+        def executor(args):
+            return {"retval": 0, "sync_was_successful": False}
+
+        code = main(
+            [str(video), "--ai-fallback"], executor=executor, judge=lambda p: []
+        )
+
+        assert code == 0
+        assert _cue_starts(subtitle)[0] == pytest.approx(15.0, abs=0.05)
+
+    def test_does_not_run_after_a_sync_that_fits_the_embedded_subtitle(
+        self, tmp_path, monkeypatch
+    ):
+        video, subtitle = _make_ai_case(tmp_path, monkeypatch)
+        good = _srt(
+            [
+                (10.0 + 3.1 * i + shift, 12.4 + 3.1 * i + shift, f"rivi {i + 1}")
+                for i in range(16)
+                for shift in [5.0 if i < 8 else 45.0]
+            ]
+        )
+
+        def executor(args):
+            Path(args.srtout).write_text(good)
+            return {"retval": 0, "offset_seconds": 5.0, "framerate_scale_factor": 1.0}
+
+        def judge(prompt):
+            raise AssertionError("fallback must not run after a good sync")
+
+        code = main([str(video), "--ai-fallback"], executor=executor, judge=judge)
+
+        assert code == 0
+        assert subtitle.read_text() == good
+
+    def test_runs_when_a_successful_sync_misses_the_embedded_subtitle(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        video, subtitle = _make_ai_case(tmp_path, monkeypatch)
+        original = subtitle.read_text()
+
+        def executor(args):
+            # The engine "succeeds" with a wrong framerate scale, in place.
+            Path(args.srtout).write_text(original.replace("00:00:1", "00:00:4"))
+            return {"retval": 0, "offset_seconds": -3.1, "framerate_scale_factor": 0.96}
+
+        code = main(
+            [str(video), "--ai-fallback"], executor=executor, judge=lambda p: []
+        )
+
+        assert code == 0
+        # AI mode started from the original timings, not from the engine's output.
+        starts = _cue_starts(subtitle)
+        assert starts[0] == pytest.approx(15.0, abs=0.05)
+        assert starts[15] == pytest.approx(101.5, abs=0.05)
+        assert "of cues on an embedded subtitle cue" in capsys.readouterr().err
+
+    def test_successful_sync_stands_without_an_embedded_text_stream(
+        self, tmp_path, monkeypatch
+    ):
+        video, subtitle = _make_ai_case(tmp_path, monkeypatch, streams=[])
+        before = subtitle.read_text()
+
+        code = main([str(video), "--ai-fallback"], executor=_fake_executor([]))
+
+        assert code == 0
+        assert subtitle.read_text() == before
+
+    def test_engine_output_is_restored_when_ai_mode_keeps_the_original(
+        self, tmp_path, monkeypatch
+    ):
+        video, subtitle = _make_ai_case(tmp_path, monkeypatch)
+        gaps = [2.3, 4.9, 3.7, 6.1, 2.9, 5.3, 4.1, 7.7, 3.3, 5.9, 2.6, 6.8]
+        cues, t = [], 3.0
+        for i, gap in enumerate(gaps):
+            cues.append((t, t + 1.2, f"muu {i}"))
+            t += gap
+        subtitle.write_text(_srt(cues))
+        engine_output = _srt([(a + 0.25, b + 0.25, text) for a, b, text in cues])
+
+        def executor(args):
+            Path(args.srtout).write_text(engine_output)
+            return {"retval": 0, "offset_seconds": 0.25, "framerate_scale_factor": 1.0}
+
+        code = main(
+            [str(video), "--ai-fallback"], executor=executor, judge=lambda p: []
+        )
+
+        assert code == 0
+        assert subtitle.read_text() == engine_output
+
+    def test_engine_result_stands_when_ai_mode_cannot_run(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        video, _ = _make_ai_case(tmp_path, monkeypatch, streams=[])
+
+        def executor(args):
+            return {"retval": 0, "kept_original_reason": "offset too large"}
+
+        code = main([str(video), "--ai-fallback"], executor=executor)
+
+        assert code == 1
+        err = capsys.readouterr().err
+        assert "Kept original subtitle" in err
+        assert "AI mode needs one as reference" in err

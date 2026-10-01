@@ -109,6 +109,25 @@ ffs video.mkv -i in.srt -o out.srt --split-penalty 30
 
 The penalty is the seconds of speech overlap a jump must gain. Upstream's default of 5 s is too eager against real audio: on seven real episodes it split already-correct subtitles into up to 53 pieces. At 30 s (the fork's default) all seven stayed untouched, and an injected 20 s jump was fixed except for a few cues right next to it (56 of 3367 cues). A segment of less than about a minute of dialogue between two jumps needs a lower penalty.
 
+### AI Mode for a Subtitle From Another Cut
+
+A subtitle made for the broadcast cut does not fit an extended cut: every added scene pushes the following lines later, so the file needs one offset per scene. One real episode needed 22 offsets from −5 s to +329 s; split mode found 3 and misplaced whole blocks. `--ai` handles this case when the video has an embedded text subtitle in another language:
+
+```bash
+ssync --ai "Episode.mkv"            # cut-aware aligner, Claude checks the doubtful stretches
+ssync --ai --ai-no-judge "Episode.mkv"   # aligner only, nothing is sent anywhere
+ssync --ai-fallback                 # normal sync first; AI mode only where that goes wrong
+```
+
+1. The embedded text track is extracted and its sound descriptions (`SIREN WAILS`) are dropped.
+2. A cut-aware aligner gives every cue an offset. It scores cue *starts* against the reference cue starts, since translations of one programme break into cues at the same moments, and lets the offset jump forward between scenes.
+3. Around each jump, in short segments and in the opening recap, timing alone can pick the wrong scene. Those cues go to Claude through the local `claude` CLI (`claude -p`, no tools), next to the reference lines around them. Claude answers which reference line each cue translates; ssync computes the offsets from the cue timings and re-runs the aligner with them as anchors.
+4. The result is written only when the cues fit the reference well; otherwise the original is kept (`--no-quality-gate` overrides).
+
+`--ai-fallback` runs AI mode when the normal sync fails or keeps the original, and also when it "succeeds" but fewer than half of the written cues start on a cue of the embedded text subtitle. The second check matters: on the example episode the engine accepted a wrong 0.96 framerate scale. AI mode then starts again from the original timings; if it cannot sync either, the engine's result stays.
+
+ssync prints the offset of every segment and the stretches of reference dialogue that have no subtitle (the added scenes). Limits: it needs an embedded **text** subtitle (not PGS), and the video must be the longer cut. `--ai` sends the text of the reviewed cues (about a quarter of the file in the example) to Claude. Without the `claude` CLI, or when a call fails, the aligner's own result is used. Related flags: `--ai-model`, `--ai-timeout`, `--ai-budget-usd`.
+
 ### ARM64 Support via ONNX TEN-VAD
 
 The native `ten-vad` package ships prebuilt binaries only for Linux x64 and macOS. This fork adds an ONNX Runtime-based backend that exposes the same interface on all platforms, including ARM64 Linux (Oracle Cloud, AWS Graviton, Raspberry Pi).

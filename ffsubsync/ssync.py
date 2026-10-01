@@ -47,13 +47,6 @@ AI_MIN_SCORE_PER_CUE = 1.1
 AI_FALLBACK_MIN_AGREEMENT = 0.5
 AI_MIN_REFERENCE_CUES = 10
 AI_MAX_JUDGE_ROUNDS = 2
-VAD_CHOICES = (
-    "subs_then_webrtc",
-    "webrtc",
-    "subs_then_tenvad",
-    "tenvad",
-    "whisper",
-)
 PREFERRED_REFERENCE_LANGS = ("eng", "en")
 # Image-based subtitle codecs. ffmpeg cannot convert them to SRT, so they cannot
 # be extracted as a text reference.
@@ -106,7 +99,6 @@ class SyncTuning:
     """
 
     gss: bool = False
-    vad: str | None = None
     max_offset_seconds: float | None = None
     use_segmented_aligner: bool = False
     no_fix_framerate: bool = False
@@ -246,12 +238,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Use golden-section search for the framerate ratio",
     )
     tuning.add_argument(
-        "--vad",
-        choices=VAD_CHOICES,
-        default=None,
-        help="Voice activity detector to use (overrides ssync's audio default)",
-    )
-    tuning.add_argument(
         "--max-offset-seconds",
         type=float,
         default=None,
@@ -378,7 +364,6 @@ def parse_options(argv: Sequence[str] | None = None) -> SsyncOptions:
         reference_source=reference_source,
         tuning=SyncTuning(
             gss=args.gss,
-            vad=args.vad,
             max_offset_seconds=args.max_offset_seconds,
             use_segmented_aligner=args.use_segmented_aligner,
             no_fix_framerate=args.no_fix_framerate,
@@ -799,9 +784,6 @@ def build_sync_args(request: SsyncSyncRequest) -> argparse.Namespace:
         args.vad = "webrtc"
 
     tuning = request.tuning
-    # An explicit --vad wins over the forced audio default above.
-    if tuning.vad is not None:
-        args.vad = tuning.vad
     if tuning.max_offset_seconds is not None:
         args.max_offset_seconds = tuning.max_offset_seconds
     if tuning.gss:

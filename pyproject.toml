@@ -56,22 +56,6 @@ dependencies = [
     "webrtcvad-wheels",
 ]
 
-[project.optional-dependencies]
-tenvad = [
-    # TEN VAD Python bindings (requires 16 kHz input)
-    # Install from git due to broken PyPI package (as per TEN-VAD official docs)
-    # Only for Linux x64 and macOS (not ARM64)
-    "ten-vad @ git+https://github.com/TEN-framework/ten-vad.git",
-]
-tenvad-onnx = [
-    # TEN VAD ONNX backend for ARM64 and platforms without prebuilt libs
-    # Requires ONNX Runtime 1.17.1+ (officially supports ARM64 Linux)
-    "onnxruntime>=1.17.1",
-]
-whisper = [
-    "faster-whisper",
-]
-
 # ---- Dev dependencies ----
 
 [dependency-groups]
@@ -114,10 +98,6 @@ style = "pep440"
 bump = true
 # Recent tags have no "v" prefix (0.4.29); older ones do (v0.4.3).
 pattern = "default-unprefixed"
-
-[tool.hatch.metadata]
-# The tenvad extra is a git URL (the PyPI package is broken).
-allow-direct-references = true
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -219,7 +199,7 @@ reportImplicitStringConcatenation = false
 reportUnusedCallResult = false
 
 [tool.codespell]
-skip = "uv.lock,*.srt,*.json,*.onnx,./tests/data,./test-data,./docs"
+skip = "uv.lock,*.srt,*.json,./tests/data,./test-data,./docs"
 # ignore-words-list = "foo,bar"
 
 [tool.pytest.ini_options]

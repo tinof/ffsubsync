@@ -336,3 +336,53 @@ def test_kept_original_is_reencoded_when_asked(tmp_path, monkeypatch):
     ffsubsync.try_sync(args, reference_pipe, {"retval": 0})
 
     assert srtout.read_bytes() == text.encode("utf-8")
+
+
+class _CountingReferencePipe:
+    def __init__(self, fit_error=None):
+        self.fit_calls = 0
+        self._fit_error = fit_error
+
+    def fit(self, _):
+        self.fit_calls += 1
+        if self._fit_error is not None:
+            raise self._fit_error
+        return self
+
+    def transform(self, _):
+        return np.zeros(10)
+
+
+def _preflight_args(tmp_path):
+    srtin = tmp_path / "in.srt"
+    srtin.write_text(SRT)
+    srtout = tmp_path / "out.srt"
+    args = ffsubsync.make_parser().parse_args(
+        ["ref.mkv", "-i", str(srtin), "-o", str(srtout), "--preflight"]
+    )
+    return args, srtout
+
+
+def test_preflight_hit_skips_reference_extraction(tmp_path, monkeypatch):
+    args, srtout = _preflight_args(tmp_path)
+    pipe = _CountingReferencePipe()
+    monkeypatch.setattr(ffsubsync, "make_reference_pipe", lambda _: pipe)
+    monkeypatch.setattr(ffsubsync, "check_already_synced", lambda *_: (True, 0.0))
+
+    result = {"retval": 0}
+    assert ffsubsync._run_impl(args, result) is True
+    assert pipe.fit_calls == 0
+    assert srtout.exists()
+
+
+def test_preflight_miss_extracts_reference_and_propagates_its_error(
+    tmp_path, monkeypatch
+):
+    args, _ = _preflight_args(tmp_path)
+    pipe = _CountingReferencePipe(fit_error=RuntimeError("unreadable reference"))
+    monkeypatch.setattr(ffsubsync, "make_reference_pipe", lambda _: pipe)
+    monkeypatch.setattr(ffsubsync, "check_already_synced", lambda *_: (False, None))
+
+    with pytest.raises(RuntimeError, match="unreadable reference"):
+        ffsubsync._run_impl(args, {"retval": 0})
+    assert pipe.fit_calls == 1

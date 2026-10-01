@@ -8,7 +8,6 @@ from ffsubsync.ssync import (
     SsyncJob,
     SsyncOptions,
     SubtitleCandidate,
-    SyncTuning,
     _candidate_subtitle_paths,
     _find_subtitle,
     _pick_reference_subtitle_stream,
@@ -766,21 +765,6 @@ class TestSyncTuning:
         assert args.use_segmented_aligner is True
         assert args.no_fix_framerate is True
         assert args.auto_sync is False
-
-    def test_explicit_vad_overrides_forced_audio_vad(self, tmp_path):
-        video, subtitle = _make_video_and_subtitle(tmp_path)
-        job = SsyncJob(
-            video=video,
-            subtitle=subtitle,
-            output=subtitle,
-            lang="fin",
-            reference_source="audio",
-            tuning=SyncTuning(vad="tenvad"),
-        )
-
-        args = build_sync_args(choose_reference_source(job, tmp_path))
-
-        assert args.vad == "tenvad"
 
     def test_defaults_leave_engine_options_untouched(self, tmp_path):
         video, subtitle = _make_video_and_subtitle(tmp_path)

@@ -21,12 +21,10 @@ from ffsubsync.aligners import (
 from ffsubsync.constants import (
     DEFAULT_APPLY_OFFSET_SECONDS,
     DEFAULT_ENCODING,
-    DEFAULT_FRAME_RATE,
     DEFAULT_MAX_FRAMERATE_DEVIATION,
     DEFAULT_MAX_OFFSET_SECONDS,
     DEFAULT_MAX_SUBTITLE_SECONDS,
     DEFAULT_MIN_SCORE,
-    DEFAULT_NON_SPEECH_LABEL,
     DEFAULT_QUALITY_MAX_OFFSET_SECONDS,
     DEFAULT_SPLIT_LENGTH_PENALTY,
     DEFAULT_SPLIT_PENALTY_SECONDS,
@@ -52,7 +50,6 @@ from ffsubsync.speech_transformers import (
     DeserializeSpeechTransformer,
     PGSSpeechTransformer,
     VideoSpeechTransformer,
-    WhisperSpeechTransformer,
     make_subtitle_speech_pipeline,
 )
 from ffsubsync.split_aligner import (
@@ -516,11 +513,26 @@ def _write_original_subtitles(
         f.write(data)
 
 
+def _fit_reference(args: argparse.Namespace, reference_pipe: Pipeline) -> None:
+    logger.info("extracting speech segments from reference '%s'...", args.reference)
+    reference_pipe.fit(args.reference)
+    logger.info("...done")
+
+
 def try_sync(
-    args: argparse.Namespace, reference_pipe: Pipeline | None, result: dict[str, Any]
+    args: argparse.Namespace,
+    reference_pipe: Pipeline | None,
+    result: dict[str, Any],
+    reference_needs_fit: bool = False,
 ) -> bool:
+    """Sync every input subtitle against the reference.
+
+    With ``reference_needs_fit`` the reference is extracted only when a subtitle
+    needs the full sync, so ``--preflight`` can skip the extraction.
+    """
     result["sync_was_successful"] = False
     sync_was_successful = True
+    reference_fit_error: Exception | None = None
     logger.info(
         "extracting speech segments from %s...",
         "stdin" if not args.srtin else f"subtitles file(s) {args.srtin}",
@@ -577,6 +589,13 @@ def try_sync(
                 if reference_pipe is None:
                     raise ValueError("reference_pipe is required when sync is enabled")
 
+                if reference_needs_fit:
+                    try:
+                        _fit_reference(args, reference_pipe)
+                    except Exception as exc:
+                        reference_fit_error = exc
+                        raise
+                    reference_needs_fit = False
                 reference_speech = reference_pipe.transform(args.reference)
                 strategies = get_alignment_strategies(args)
                 strategy_results: list[
@@ -776,7 +795,11 @@ def try_sync(
                     offset_seconds,
                     args.suppress_output_if_offset_less_than,
                 )
-        except Exception:
+        except Exception as exc:
+            if exc is reference_fit_error:
+                # A reference that cannot be read fails the whole run, as it
+                # does when it is extracted up front.
+                raise
             sync_was_successful = False
             logger.exception("failed to sync %s", srtin)
         else:
@@ -801,9 +824,7 @@ def make_reference_pipe(args: argparse.Namespace) -> Pipeline:
     elif ref_format in ("npy", "npz"):
         if args.vad is not None:
             logger.warning("Vad specified, but reference was not a movie")
-        return Pipeline(
-            [("deserialize", DeserializeSpeechTransformer(args.non_speech_label))]
-        )
+        return Pipeline([("deserialize", DeserializeSpeechTransformer())])
     elif getattr(args, "pgs_ref_stream", None) is not None:
         if args.vad is not None:
             logger.warning("Vad specified, but the reference is a PGS subtitle stream")
@@ -831,21 +852,6 @@ def make_reference_pipe(args: argparse.Namespace) -> Pipeline:
         ref_stream = args.reference_stream
         if ref_stream is not None and not ref_stream.startswith("0:"):
             ref_stream = "0:" + ref_stream
-        if vad == "whisper":
-            return Pipeline(
-                [
-                    (
-                        "speech_extract",
-                        WhisperSpeechTransformer(
-                            sample_rate=SAMPLE_RATE,
-                            frame_rate=args.frame_rate,
-                            start_seconds=args.start_seconds,
-                            ffmpeg_path=args.ffmpeg_path,
-                            vlc_mode=args.vlc_mode,
-                        ),
-                    ),
-                ]
-            )
         return Pipeline(
             [
                 (
@@ -853,8 +859,6 @@ def make_reference_pipe(args: argparse.Namespace) -> Pipeline:
                     VideoSpeechTransformer(
                         vad=vad,
                         sample_rate=SAMPLE_RATE,
-                        frame_rate=args.frame_rate,
-                        non_speech_label=args.non_speech_label,
                         start_seconds=args.start_seconds,
                         ffmpeg_path=args.ffmpeg_path,
                         ref_stream=ref_stream,
@@ -1039,10 +1043,14 @@ def _run_impl(args: argparse.Namespace, result: dict[str, Any]) -> bool:
     ):
         return try_sync(args, None, result)
     reference_pipe = make_reference_pipe(args)
-    logger.info("extracting speech segments from reference '%s'...", args.reference)
-    reference_pipe.fit(args.reference)
-    logger.info("...done")
-    if args.make_test_case or args.serialize_speech:
+    serialize = args.make_test_case or args.serialize_speech
+    # With --preflight, extract the reference only if the preflight check does
+    # not settle the file. Reading the whole container is the slow step.
+    defer_fit = bool(getattr(args, "preflight", False) and args.srtin and not serialize)
+    if defer_fit:
+        return try_sync(args, reference_pipe, result, reference_needs_fit=True)
+    _fit_reference(args, reference_pipe)
+    if serialize:
         logger.info("serializing speech...")
         np.savez_compressed(
             _npy_savename(args), speech=reference_pipe.transform(args.reference)
@@ -1259,21 +1267,9 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
         "not change.",
     )
     parser.add_argument(
-        "--frame-rate",
-        type=int,
-        default=DEFAULT_FRAME_RATE,
-        help=f"Frame rate for audio extraction (default={DEFAULT_FRAME_RATE}).",
-    )
-    parser.add_argument(
         "--skip-infer-framerate-ratio",
         action="store_true",
         help="If set, do not try to infer framerate ratio based on duration ratio.",
-    )
-    parser.add_argument(
-        "--non-speech-label",
-        type=float,
-        default=DEFAULT_NON_SPEECH_LABEL,
-        help=f"Label to use for frames detected as non-speech (default={DEFAULT_NON_SPEECH_LABEL:f})",
     )
     parser.add_argument(
         "--output-encoding",
@@ -1289,24 +1285,18 @@ def add_cli_only_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--vad",
-        choices=[
-            "subs_then_webrtc",
-            "webrtc",
-            "subs_then_tenvad",
-            "tenvad",
-            "whisper",
-        ],
+        choices=["subs_then_webrtc", "webrtc"],
         default=None,
-        help="Which voice activity detector to use for speech extraction "
-        f"(if using video / audio as a reference, default={DEFAULT_VAD}).",
+        help="Speech source for a video / audio reference: 'webrtc' runs WebRTC "
+        "VAD on the audio, 'subs_then_webrtc' first tries an embedded subtitle "
+        f"stream (default={DEFAULT_VAD}).",
     )
     parser.add_argument(
         "--vad-smoothing-window",
         type=int,
         default=30,
         help="Window size in frames (10ms) for smoothing VAD output. "
-        "Larger values fill longer pauses. Default=30 (300ms). "
-        "Only applies to WebRTC VAD.",
+        "Larger values fill longer pauses. Default=30 (300ms).",
     )
     parser.add_argument(
         "--no-fix-framerate",

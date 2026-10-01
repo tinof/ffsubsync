@@ -100,8 +100,6 @@ def check_already_synced(
         ref_transformer = VideoSpeechTransformer(
             vad=vad,
             sample_rate=SAMPLE_RATE,
-            frame_rate=args.frame_rate,
-            non_speech_label=args.non_speech_label,
             start_seconds=args.start_seconds,
             ffmpeg_path=args.ffmpeg_path,
             ref_stream=None,
@@ -132,7 +130,6 @@ def check_already_synced(
             fmt=srtin_fmt,
             caching=False,
             scale_factor=1.0,
-            non_speech_label=args.non_speech_label,
             start_seconds=args.start_seconds,
         )
         sub_speech = srt_pipe.fit_transform(srtin)

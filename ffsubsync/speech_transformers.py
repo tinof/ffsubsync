@@ -18,6 +18,7 @@ from ffsubsync.constants import (
     DEFAULT_SCALE_FACTOR,
     DEFAULT_START_SECONDS,
     SAMPLE_RATE,
+    VAD_FRAME_RATE,
 )
 from ffsubsync.ffmpeg_utils import ffmpeg_bin_path, subprocess_args
 from ffsubsync.generic_subtitles import GenericSubtitle
@@ -99,7 +100,6 @@ def _smooth_speech(raw_speech: np.ndarray, window_size: int = 30) -> np.ndarray:
 def _make_webrtcvad_detector(
     sample_rate: int,
     frame_rate: int,
-    non_speech_label: float,
     smoothing_window_size: int = 30,
 ) -> Callable[[bytes], np.ndarray]:
     import webrtcvad
@@ -132,8 +132,7 @@ def _make_webrtcvad_detector(
                 is_speech = vad.is_speech(bytes(chunk), sample_rate=frame_rate)
             except Exception:
                 is_speech = False
-            # webrtcvad has low recall on mode 3, so treat non-speech as "not sure"
-            media_bstring.append(1.0 if is_speech else non_speech_label)
+            media_bstring.append(1.0 if is_speech else 0.0)
 
         result = np.array(media_bstring)
 
@@ -142,202 +141,6 @@ def _make_webrtcvad_detector(
         return _smooth_speech(result, window_size=smoothing_window_size)
 
     return _detect
-
-
-def _make_tenvad_detector(
-    sample_rate: int, frame_rate: int, non_speech_label: float
-) -> Callable[[bytes], np.ndarray]:
-    """
-    Create a detector using TEN VAD.
-
-    Notes
-    - TEN VAD expects 16 kHz audio and a hop size of either 160 (10 ms)
-      or 256 (16 ms). We derive hop size from the requested window length
-      implied by `sample_rate` and `frame_rate`.
-    - Returns per-window speech probabilities in [0, 1].
-    """
-    try:
-        from ten_vad import TenVad  # type: ignore
-    except Exception:  # pragma: no cover - optional dependency
-        # Fallback to ONNX-based implementation (ARM64 compatible)
-        try:
-            from ffsubsync.ten_vad_onnx import TenVadONNX as TenVad  # type: ignore
-
-            logger.info(
-                "Using ONNX-based TEN-VAD backend (ARM64/aarch64 compatible). "
-                "For better performance on x64 platforms, install: pip install ten-vad"
-            )
-        except Exception as e:  # pragma: no cover
-            logger.error(
-                "Error: Neither ten-vad nor ONNX backend available.\n"
-                "Install with: pip install ffsubsync[tenvad-onnx]\n"
-                "Or for x64 platforms: pip install ten-vad\n"
-                "TEN VAD requires 16 kHz audio."
-            )
-            raise e
-
-    # Window duration in seconds and derived hop size in samples
-    window_duration = 1.0 / sample_rate
-    frames_per_window = int(window_duration * frame_rate + 0.5)
-
-    # Instantiate detector with derived hop size and a default threshold.
-    # Threshold only affects the binary flag; we will consume the probability.
-    threshold = 0.5
-    ten = TenVad(frames_per_window, threshold)
-
-    def _detect(asegment: bytes) -> np.ndarray:
-        # View as int16 without copying
-        pcm = np.frombuffer(asegment, dtype=np.int16)
-        n = len(pcm)
-        media_bstring: list[float] = []
-        # Process in hop-sized chunks
-        for start in range(0, n, frames_per_window):
-            stop = min(start + frames_per_window, n)
-            # If final chunk shorter than hop, pad with zeros to expected length
-            chunk = pcm[start:stop]
-            if len(chunk) < frames_per_window:
-                padded = np.zeros(frames_per_window, dtype=np.int16)
-                padded[: len(chunk)] = chunk
-                chunk = padded
-            try:
-                prob, _ = ten.process(chunk)  # returns (probability, 0/1)
-            except Exception:  # pragma: no cover
-                # Be conservative on exception; treat as non-speech but not certain
-                prob = 0.0
-            # Blend with non_speech_label similar to Silero path
-            media_bstring.append(1.0 - (1.0 - float(prob)) * (1.0 - non_speech_label))
-        return np.array(media_bstring, dtype=float)
-
-    return _detect
-
-
-class WhisperSpeechTransformer(TransformerMixin):
-    def __init__(
-        self,
-        sample_rate: int,
-        frame_rate: int,
-        start_seconds: int = 0,
-        ffmpeg_path: str | None = None,
-        vlc_mode: bool = False,
-        max_transcription_seconds: float = 300.0,
-    ) -> None:
-        super().__init__()
-        self.sample_rate: int = sample_rate
-        self.frame_rate: int = frame_rate
-        self.start_seconds: int = start_seconds
-        self.ffmpeg_path: str | None = ffmpeg_path
-        self.vlc_mode: bool = vlc_mode
-        self.max_transcription_seconds: float = max_transcription_seconds
-        self.video_speech_results_: np.ndarray | None = None
-
-    def fit(self, fname: str, *_) -> "WhisperSpeechTransformer":
-        try:
-            from faster_whisper import WhisperModel
-        except ImportError:
-            raise ImportError(
-                "faster-whisper is required for Whisper VAD. "
-                "Install with: pip install ffsubsync[whisper] or pip install faster-whisper"
-            ) from None
-
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(suffix=".wav") as tmp_audio:
-            logger.info("Extracting audio for Whisper VAD...")
-
-            ffmpeg_args = [
-                ffmpeg_bin_path("ffmpeg", ffmpeg_resources_path=self.ffmpeg_path)
-            ]
-            if self.start_seconds > 0:
-                ffmpeg_args.extend(["-ss", str(timedelta(seconds=self.start_seconds))])
-
-            ffmpeg_args.extend(
-                [
-                    "-y",
-                    "-loglevel",
-                    "fatal",
-                    "-nostdin",
-                    "-i",
-                    fname,
-                    "-ac",
-                    "1",
-                    "-ar",
-                    "16000",
-                ]
-            )
-
-            # We can limit the duration of extraction too, to save time!
-            # But user didn't explicitly ask for that, and we might want to keep it simple.
-            # Actually, if we only need 5 mins, we should only extract 5 mins.
-            # Let's add -t to ffmpeg if max_transcription_seconds is set.
-            if self.max_transcription_seconds:
-                ffmpeg_args.extend(["-t", str(self.max_transcription_seconds)])
-
-            ffmpeg_args.extend(["-f", "wav", tmp_audio.name])
-            subprocess.check_call(ffmpeg_args, **subprocess_args(include_stdout=False))
-
-            logger.info("Loading faster-whisper model 'tiny'...")
-            # device="cpu" and compute_type="int8" are good defaults for speed on most machines including ARM64
-            model = WhisperModel("tiny", device="cpu", compute_type="int8")
-
-            logger.info("Transcribing audio...")
-            # vad_filter=True helps remove non-speech noises even within segments
-            # But it might be too aggressive for speech over music. Let's try False.
-            segments, info = model.transcribe(tmp_audio.name, vad_filter=False)
-
-            # info.duration is the duration of the audio file we passed in
-            # We must use self.sample_rate (100Hz) for the output array, NOT self.frame_rate (audio rate)
-            duration_to_use = info.duration
-            if (
-                self.max_transcription_seconds
-                and duration_to_use > self.max_transcription_seconds
-            ):
-                duration_to_use = self.max_transcription_seconds
-
-            total_frames = int(duration_to_use * self.sample_rate)
-            media_bstring = np.zeros(
-                total_frames + 100, dtype=float
-            )  # Add a bit of padding just in case
-
-            count = 0
-            for segment in segments:
-                if (
-                    self.max_transcription_seconds
-                    and segment.end > self.max_transcription_seconds
-                ):
-                    break
-
-                # Filter out music/sound markers if possible
-                text = segment.text.strip()
-                if text.startswith("[") and text.endswith("]"):
-                    logger.info(
-                        f"Ignored non-speech segment: {text} at {segment.start}-{segment.end}"
-                    )
-                    continue
-
-                logger.info(f"Speech segment: {text} at {segment.start}-{segment.end}")
-
-                start_frame = int(segment.start * self.sample_rate)
-                end_frame = int(segment.end * self.sample_rate)
-                # Clip to array bounds
-                start_frame = max(0, start_frame)
-                end_frame = min(len(media_bstring), end_frame)
-
-                if end_frame > start_frame:
-                    media_bstring[start_frame:end_frame] = 1.0
-                count += 1
-
-            # Trim to actual duration if needed, but having a bit extra is usually fine.
-            # The aligner might complain if sizes are vastly different, but usually it handles it.
-            # Let's trim to the exact frame count expected from info.duration
-            media_bstring = media_bstring[:total_frames]
-
-            logger.info(f"Detected {count} speech segments.")
-            self.video_speech_results_ = media_bstring
-
-        return self
-
-    def transform(self, *_) -> np.ndarray:
-        return self.video_speech_results_
 
 
 class ComputeSpeechFrameBoundariesMixin:
@@ -366,8 +169,6 @@ class VideoSpeechTransformer(TransformerMixin):
         self,
         vad: str,
         sample_rate: int,
-        frame_rate: int,
-        non_speech_label: float,
         start_seconds: int = 0,
         ffmpeg_path: str | None = None,
         ref_stream: str | None = None,
@@ -380,23 +181,7 @@ class VideoSpeechTransformer(TransformerMixin):
         self.sample_rate: int = sample_rate
         self.vad_smoothing_window: int = vad_smoothing_window
         self.max_duration_seconds: float | None = max_duration_seconds
-        # TEN VAD requires 16 kHz input. If selected, force 16kHz for extraction.
-        if "tenvad" in vad and frame_rate != 16000:
-            logger.info(
-                "TEN VAD selected: overriding frame_rate %d -> 16000 for extraction.",
-                frame_rate,
-            )
-            self.frame_rate = 16000
-        # WebRTC VAD: speech information is fully contained in 16kHz, so downsample for 3x speedup
-        elif "webrtc" in vad and frame_rate > 16000:
-            logger.info(
-                "WebRTC VAD selected: reducing frame_rate from %d to 16000 for 3x speedup.",
-                frame_rate,
-            )
-            self.frame_rate = 16000
-        else:
-            self.frame_rate: int = frame_rate
-        self._non_speech_label: float = non_speech_label
+        self.frame_rate: int = VAD_FRAME_RATE
         self.start_seconds: int = start_seconds
         self.ffmpeg_path: str | None = ffmpeg_path
         self.ref_stream: str | None = ref_stream
@@ -452,31 +237,6 @@ class VideoSpeechTransformer(TransformerMixin):
         subs_to_use = embedded_subs[int(np.argmax(embedded_subs_times))]
         self.video_speech_results_ = subs_to_use.subtitle_speech_results_
 
-    def _build_detector(self) -> Callable[[bytes], np.ndarray]:
-        if "webrtc" in self.vad:
-            return _make_webrtcvad_detector(
-                self.sample_rate,
-                self.frame_rate,
-                self._non_speech_label,
-                self.vad_smoothing_window,
-            )
-        if "tenvad" in self.vad:
-            try:
-                return _make_tenvad_detector(
-                    self.sample_rate, self.frame_rate, self._non_speech_label
-                )
-            except Exception as exc:  # pragma: no cover - fallback path
-                logger.warning(
-                    "TEN VAD unavailable (%s); falling back to WebRTC VAD.", exc
-                )
-                return _make_webrtcvad_detector(
-                    self.sample_rate,
-                    self.frame_rate,
-                    self._non_speech_label,
-                    self.vad_smoothing_window,
-                )
-        raise ValueError(f"unknown vad: {self.vad}")
-
     def fit(self, fname: str, *_) -> "VideoSpeechTransformer":
         if "subs" in self.vad and (
             self.ref_stream is None or self.ref_stream.startswith("0:s:")
@@ -504,7 +264,9 @@ class VideoSpeechTransformer(TransformerMixin):
         except Exception as e:
             logger.warning(e)
             total_duration = None
-        detector = self._build_detector()
+        detector = _make_webrtcvad_detector(
+            self.sample_rate, self.frame_rate, self.vad_smoothing_window
+        )
         media_bstring: list[np.ndarray] = []
         ffmpeg_args = [
             ffmpeg_bin_path("ffmpeg", ffmpeg_resources_path=self.ffmpeg_path)
@@ -582,7 +344,7 @@ class VideoSpeechTransformer(TransformerMixin):
         if len(media_bstring) == 0:
             raise ValueError(
                 "Unable to detect speech. "
-                "Perhaps try specifying a different stream / track, or a different vad."
+                "Perhaps try specifying a different stream / track."
             )
         self.video_speech_results_ = np.concatenate(media_bstring)
         logger.info("total of speech segments: %s", np.sum(self.video_speech_results_))
@@ -668,9 +430,8 @@ class SubtitleSpeechTransformer(TransformerMixin, ComputeSpeechFrameBoundariesMi
 
 
 class DeserializeSpeechTransformer(TransformerMixin):
-    def __init__(self, non_speech_label: float) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self._non_speech_label: float = non_speech_label
         self.deserialized_speech_results_: np.ndarray | None = None
 
     def fit(self, fname, *_) -> "DeserializeSpeechTransformer":
@@ -683,7 +444,7 @@ class DeserializeSpeechTransformer(TransformerMixin):
                     'could not find "speech" array in '
                     f"serialized file; only contains: {speech.files}"
                 )
-        speech[speech < 1.0] = self._non_speech_label
+        speech[speech < 1.0] = 0.0
         self.deserialized_speech_results_ = speech
         return self
 

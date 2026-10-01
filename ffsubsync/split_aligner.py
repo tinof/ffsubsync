@@ -119,8 +119,8 @@ def compute_split_offsets(
     # Prefix sum of the binary reference. Pad both ends by the offset half-width
     # plus the max guard band, so every shifted lookup lands in a flat region
     # (0 on the left, total speech on the right) that adds no speech.
-    # >= 0.5, not > 0: some VADs (TEN-VAD) give probabilities, and a silence
-    # probability of 0.01 must not count as speech.
+    # >= 0.5, not > 0: a serialized reference may hold probabilities, and a
+    # silence probability of 0.01 must not count as speech.
     ref = (np.asarray(reference, dtype=np.float64) >= 0.5).astype(np.float64)
     cumsum = np.concatenate([np.zeros(1), np.cumsum(ref)])  # cumsum[k] = sum(ref[:k])
     # Cue positions can lie outside the reference (start_seconds carries the

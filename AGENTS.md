@@ -62,10 +62,9 @@ cool-off. This fork is not published to PyPI.
 - `--dry-run` reports resolved jobs and reference policy without running
   extraction or synchronization.
 - Advanced tuning flags are forwarded to the sync engine for when the default
-  sync is off: `--gss`, `--vad`, `--max-offset-seconds`,
-  `--use-segmented-aligner`, `--no-fix-framerate`, and `--no-auto-sync`. An
-  explicit `--vad` overrides the `webrtc` VAD that ssync forces for audio
-  references.
+  sync is off: `--gss`, `--max-offset-seconds`,
+  `--use-segmented-aligner`, `--no-fix-framerate`, and `--no-auto-sync`. ssync
+  has no `--vad`: it always sets `webrtc` for an audio reference.
 - The low-quality safety net is on by default: `build_sync_args()` sets the
   engine's `--skip-sync-on-low-quality`. When `assess_alignment_quality()` in
   `ffsubsync.py` returns reasons (negative score, offset above
@@ -113,7 +112,7 @@ cool-off. This fork is not published to PyPI.
   (`main(..., judge=...)`, `execute_job(..., judge=...)`) like the executor.
 
 On this Ubuntu machine the commands are an editable uv tool install of this
-checkout (`uv tool install --editable /home/ubuntu/ffsubsync --with onnxruntime`,
+checkout (`uv tool install --editable /home/ubuntu/ffsubsync`,
 commands in `~/.local/bin`), so code changes are live at once. Run the install
 again with `--force` after a change to dependencies or entry points. If the user
 asks to install or refresh the command they actually run, verify `ssync` from
@@ -124,7 +123,7 @@ outside the checkout.
 Install the project and all development dependencies into `.venv`:
 
 ```bash
-make install        # uv sync --all-groups --extra tenvad-onnx
+make install        # uv sync --all-groups
 ```
 
 Lint and format (codespell, ruff check, ruff format):
@@ -161,8 +160,6 @@ make build              # sdist and wheel in dist/
 ```
 
 After a dependency change, commit `uv.lock`; CI installs with `uv sync --locked`.
-The `tenvad` extra is a git dependency without Linux ARM64 support, so do not
-use `--all-extras` on this machine.
 
 Use focused commands while developing. Examples:
 
@@ -231,8 +228,6 @@ physical ratio.
   (`--tools ""`, `--setting-sources ""`, `--json-schema`, answer in
   `structured_output`), and validation of the returned matches. Claude returns
   cue pairs, never offsets. Every failure raises `JudgeUnavailable`.
-- `ffsubsync/ten_vad_onnx.py` and `ffsubsync/onnx_models/`: ONNX TEN-VAD
-  compatibility backend.
 - `ffsubsync/tools/piecewise_sync.py`: standalone tool for progressive mid-file
   drift. Run with `python -m ffsubsync.tools.piecewise_sync`.
 - `ffsubsync/sklearn_shim.py`: small local `Pipeline` and `TransformerMixin`
@@ -258,29 +253,28 @@ When working on late-from-start or long-file alignment bugs, the highest-signal
 tests are usually `tests/test_segmented_aligner.py` and
 `tests/test_strategy_selection.py`.
 
-## VAD Backends
+## VAD
 
-`DEFAULT_VAD` is `subs_then_webrtc`. For video/audio references this first tries
-subtitle-stream based extraction where possible, then falls back to WebRTC audio
-VAD.
+WebRTC VAD (`webrtcvad-wheels`) is the only backend. TEN-VAD and Whisper were
+removed in October 2026; do not add them back.
 
-Supported explicit VAD choices include:
+The engine's `--vad` has two values:
 
-- `webrtc`: WebRTC VAD through `webrtcvad-wheels`.
-- `subs_then_webrtc`: subtitle-stream first, then WebRTC.
-- `tenvad`: TEN-VAD native backend.
-- `subs_then_tenvad`: subtitle-stream first, then TEN-VAD.
-- `whisper`: Whisper-based speech extraction.
+- `subs_then_webrtc` (`DEFAULT_VAD`): first try an embedded text subtitle stream
+  as the reference, then fall back to WebRTC on the audio.
+- `webrtc`: always use the audio. ssync sets this for audio references.
 
-TEN-VAD requires 16 kHz audio; the code adjusts frame rate automatically for
-TEN-VAD modes. Optional extras:
+Audio is always extracted as 16 kHz mono (`VAD_FRAME_RATE`) and non-speech
+frames are 0.0. There is no `--frame-rate` or `--non-speech-label` flag.
 
-- `tenvad`: native TEN-VAD. Linux x64 and macOS.
-- `tenvad-onnx`: ONNX Runtime backend, including Linux ARM64 support.
-- `whisper`: faster-whisper, for `--vad whisper`.
+Speech extraction time is ffmpeg reading the container: WebRTC itself costs
+about 1.5 s per 2 h of audio, and the extraction rate or stream flags do not
+change the total. Do not look for a speedup in the VAD loop.
 
-If native `ten-vad` import fails, the code attempts the ONNX backend before
-falling back to WebRTC.
+With `--preflight`, `_run_impl()` does not extract the reference up front:
+`try_sync(..., reference_needs_fit=True)` runs the preflight check first and
+extracts the full reference only for a subtitle that needs the full sync. A
+reference that cannot be read still raises out of `run()`.
 
 ## Testing Guide
 
@@ -297,7 +291,6 @@ Test files by area:
 - `tests/test_segmented_aligner.py`: segmented voting and tail-window behavior.
 - `tests/test_strategy_selection.py`: adaptive strategy and framerate-ratio
   selection.
-- `tests/test_tenvad_backend.py`: TEN-VAD backend selection and fallback.
 - `tests/test_subtitles.py`: subtitle parsing and transformations.
 - `tests/test_cut_aligner.py`, `tests/test_ai_judge.py`: AI mode. The regression
   fixture `tests/data/cut_blue_lights_s01e02.json` holds cue timings only.
@@ -325,13 +318,6 @@ task.
 
 ## Common Workflows
 
-Adding a VAD backend:
-
-1. Add a detector factory in `speech_transformers.py`.
-2. Register selection and fallback behavior in `VideoSpeechTransformer`.
-3. Add constants or CLI choices if needed.
-4. Add focused tests, usually near `tests/test_tenvad_backend.py`.
-
 Adding subtitle format support:
 
 1. Extend parsing in `subtitle_parser.py`.
@@ -347,7 +333,6 @@ Debugging sync failures:
 - Try `--gss` for exhaustive framerate-ratio search.
 - Try `--use-segmented-aligner` for long intros, sparse speech, or misleading
   global matches.
-- Try `--vad=tenvad` when WebRTC speech detection appears weak.
 - Use `--preflight` to skip full sync when subtitles are probably already
   aligned.
 - Use `python -m ffsubsync.tools.piecewise_sync` for progressive mid-file drift.

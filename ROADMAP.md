@@ -10,8 +10,6 @@ This document serves as a development handoff for continuing work on this fork o
 |---------|----------|-----------|
 | Basic sync (offset + scale) | ✅ | ✅ |
 | WebRTC VAD | ✅ | ✅ |
-| TEN VAD (native) | ✅ | ✅ |
-| TEN VAD (ONNX/ARM64) | ❌ | ✅ |
 | Piecewise sync (mid-file drift) | ❌ | ✅ |
 
 ### Repository
@@ -23,21 +21,11 @@ This document serves as a development handoff for continuing work on this fork o
 
 ## Completed Features
 
-### 1. ONNX-based TEN VAD for ARM64
+### 1. ONNX-based TEN VAD for ARM64 (removed)
 
-**Problem**: Native TEN VAD binaries only available for x86_64. ARM64 users (Oracle Cloud, AWS Graviton, Raspberry Pi) couldn't use high-accuracy VAD.
-
-**Solution**: Added ONNX Runtime backend that loads official TEN-VAD ONNX model.
-
-**Files**:
-- `ffsubsync/speech_transformers.py` - ONNX detector implementation
-- `pyproject.toml` - `tenvad-onnx` extra
-
-**Usage**:
-```bash
-pip install ffsubsync[tenvad-onnx]
-ffs video.mkv -i input.srt -o output.srt --vad=tenvad
-```
+TEN VAD (native and ONNX) and the Whisper backend were removed in October 2026.
+TEN VAD matched WebRTC VAD in the benchmark and Whisper was unused. WebRTC VAD is
+now the only backend.
 
 ### 2. Piecewise Sync for Mid-File Drift
 
@@ -165,7 +153,7 @@ piecewise-sync = "ffsubsync.tools.piecewise_sync:main"
 |------|---------|
 | `ffsubsync/ffsubsync.py` | Main entry point, CLI parsing |
 | `ffsubsync/aligners.py` | FFT-based alignment algorithms |
-| `ffsubsync/speech_transformers.py` | VAD backends (WebRTC, TEN, ONNX) |
+| `ffsubsync/speech_transformers.py` | Speech extraction (WebRTC VAD, subtitles, PGS) |
 | `ffsubsync/subtitle_transformers.py` | Subtitle manipulation (shift, scale, merge) |
 | `ffsubsync/tools/piecewise_sync.py` | Piecewise sync tool |
 
@@ -231,7 +219,7 @@ When continuing development:
 
 This fork was developed across multiple sessions. Key decisions:
 
-1. **Why ONNX for ARM64?**: Native TEN VAD requires specific binaries. ONNX Runtime is cross-platform.
+1. **Why only WebRTC VAD?**: TEN VAD matched WebRTC in the benchmark and Whisper was unused, so both were removed.
 
 2. **Why piecewise sync as separate tool?**:
    - Minimize changes to core ffsubsync code

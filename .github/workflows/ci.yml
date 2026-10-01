@@ -46,7 +46,7 @@ jobs:
 
       - name: Install dependencies
         # --locked: install from uv.lock and fail if pyproject.toml made it stale.
-        run: uv sync --locked --all-groups --extra tenvad-onnx
+        run: uv sync --locked --all-groups
 
       - name: Run linting
         # Check-only mode so CI fails on unformatted code instead of fixing it.
@@ -126,7 +126,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --locked --all-groups --extra tenvad-onnx
+        run: uv sync --locked --all-groups
 
       - name: Run unit tests
         run: uv run pytest -v -m 'not integration' tests/
@@ -155,7 +155,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --locked --all-groups --extra tenvad-onnx
+        run: uv sync --locked --all-groups
 
       - name: Run integration tests
         env:

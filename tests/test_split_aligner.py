@@ -119,7 +119,7 @@ def test_non_dialogue_cue_follows_its_neighbours():
 
 
 def test_probability_reference_is_thresholded():
-    # Regression: TEN-VAD gives probabilities. With "> 0" every silence frame at
+    # Regression: a reference may hold probabilities. With "> 0" every silence frame at
     # 0.01 counted as speech and correctly placed cues were moved.
     reference = np.full(40 * SAMPLE_RATE, 0.01)
     for a, b in [(10, 11), (20, 22), (30, 31.5)]:

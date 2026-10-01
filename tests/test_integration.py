@@ -54,7 +54,8 @@ def gen_synctest_configs():
 
 def timestamps_roughly_match(f1, f2):
     parser = GenericSubtitleParser(skip_ssa_info=True)
-    extractor = SubtitleSpeechTransformer(sample_rate=ffsubsync.DEFAULT_FRAME_RATE)
+    # 48000 is the historical resolution of this comparison, not an audio rate.
+    extractor = SubtitleSpeechTransformer(sample_rate=48000)
     pipe = make_pipeline(parser, extractor)
     f1_bitstring = pipe.fit_transform(f1).astype(bool)
     f2_bitstring = pipe.fit_transform(f2).astype(bool)

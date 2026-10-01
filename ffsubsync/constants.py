@@ -8,8 +8,9 @@ FRAMERATE_RATIOS: list[float] = [24.0 / 23.976, 25.0 / 23.976, 25.0 / 24.0]
 # Ratios outside this tolerance are treated as non-physical and discarded.
 FRAMERATE_SNAP_TOLERANCE: float = 0.005
 
-DEFAULT_FRAME_RATE: int = 48000
-DEFAULT_NON_SPEECH_LABEL: float = 0.0
+# Audio extraction rate for WebRTC VAD. It resamples to 8 kHz internally, so a
+# higher rate adds nothing.
+VAD_FRAME_RATE: int = 16000
 DEFAULT_ENCODING: str = "infer"
 DEFAULT_MAX_SUBTITLE_SECONDS: int = 10
 DEFAULT_START_SECONDS: int = 0

@@ -42,3 +42,11 @@ def test_auto_sync_respects_no_fix_framerate_for_adaptive_strategy():
         ("primary", False, False),
         ("adaptive-segmented", False, True),
     ]
+
+
+def test_vad_choices_are_webrtc_only():
+    parser = make_parser()
+    assert parser.parse_args(["--vad", "webrtc"]).vad == "webrtc"
+    assert parser.parse_args(["--vad", "subs_then_webrtc"]).vad == "subs_then_webrtc"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--vad", "tenvad"])

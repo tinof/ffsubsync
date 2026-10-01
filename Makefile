@@ -13,9 +13,7 @@ export UV_CONFIG_FILE
 UV_EXCLUDE_NEWER ?= 14 days
 export UV_EXCLUDE_NEWER
 
-# The tenvad extra is a git dependency without Linux ARM64 support, so it is
-# not installed by default.
-SYNC_ARGS := --all-groups --extra tenvad-onnx
+SYNC_ARGS := --all-groups
 
 .PHONY: default install lint lint-check typecheck test test-integration upgrade build clean
 

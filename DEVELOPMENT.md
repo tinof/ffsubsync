@@ -15,7 +15,7 @@ Copier.
 2. **Install the project and all development dependencies** into `.venv`:
    ```bash
    make install
-   # same as: uv sync --all-groups --extra tenvad-onnx
+   # same as: uv sync --all-groups
    ```
 
 3. **Run the checks**:
@@ -39,7 +39,7 @@ The Makefile is a thin wrapper around uv. It sets `UV_CONFIG_FILE` to the checke
 
 | Target | What it does |
 |--------|--------------|
-| `make install` | `uv sync` with all dependency groups and the `tenvad-onnx` extra |
+| `make install` | `uv sync` with all dependency groups |
 | `make lint` | codespell, `ruff check --fix`, `ruff format` (changes files) |
 | `make lint-check` | The same checks without changes. CI runs this. |
 | `make typecheck` | `basedpyright ffsubsync`. Not a CI gate; the code is only partially typed. |
@@ -67,8 +67,6 @@ uv run ssync --help
   and commit `uv.lock`.
 - `uv.toml` sets `exclude-newer = "14 days"`: uv ignores releases younger than 14 days.
   This is a supply-chain cool-off period.
-- The `tenvad` extra is a git dependency without Linux ARM64 support, so `make install`
-  does not install it. Use `uv sync --all-groups --extra tenvad` on Linux x64 or macOS.
 
 ## Code Quality Standards
 

@@ -67,9 +67,15 @@ ffs movie.mkv -i in.srt -o out.srt --pgs-ref-stream        # first PGS track
 ffs movie.mkv -i in.srt -o out.srt --pgs-ref-stream s:2    # a specific track
 ```
 
+### One VAD: WebRTC
+
+Speech detection on audio uses WebRTC VAD only. The TEN-VAD and Whisper backends, their install extras, and the `--frame-rate` and `--non-speech-label` flags were removed: WebRTC gave the same alignment, and the VAD is not the slow step (about 1.5 s per 2 h of audio; the rest of the time is ffmpeg reading the file). Audio is always extracted as 16 kHz mono.
+
+`ffs --vad` accepts `subs_then_webrtc` (default: use an embedded text subtitle as the reference when there is one, else the audio) and `webrtc` (always the audio). `ssync` has no `--vad`; use `--reference-source` there.
+
 ### `--preflight` — Fast "Already in Sync?" Check
 
-Passing `--preflight` (or `--skip-if-synced`) runs a short probe on the first ~2 minutes of audio before committing to the full extraction pipeline. If the subtitle is already aligned, the full pipeline is skipped entirely and the file is written with a zero shift.
+Passing `--preflight` (or `--skip-if-synced`) runs a short probe on the first ~2 minutes of audio before committing to the full extraction pipeline. If the subtitle is already aligned, the full audio extraction is never started and the file is written with the small offset the probe measured. An already-synced file takes about a second instead of the full extraction time.
 
 The probe passes three gates: offset ≤ 0.5 s, score margin ≥ 1.5x, and at least 5% voiced frames in the window (so silent intros don't produce false positives). Any gate failing causes preflight to abstain and fall through to the normal pipeline.
 
@@ -128,14 +134,6 @@ ssync --ai-fallback                 # normal sync first; AI mode only where that
 
 ssync prints the offset of every segment and the stretches of reference dialogue that have no subtitle (the added scenes). Limits: it needs an embedded **text** subtitle (not PGS), and the video must be the longer cut. `--ai` sends the text of the reviewed cues (about a quarter of the file in the example) to Claude. Without the `claude` CLI, or when a call fails, the aligner's own result is used. Related flags: `--ai-model`, `--ai-timeout`, `--ai-budget-usd`.
 
-### ARM64 Support via ONNX TEN-VAD
-
-The native `ten-vad` package ships prebuilt binaries only for Linux x64 and macOS. This fork adds an ONNX Runtime-based backend that exposes the same interface on all platforms, including ARM64 Linux (Oracle Cloud, AWS Graviton, Raspberry Pi).
-
-- Install with `pip install ffsubsync[tenvad-onnx]` for all platforms
-- Install with `pip install ffsubsync[tenvad]` for Linux x64 / macOS (native, slightly faster)
-- Falls back automatically: native TEN-VAD → ONNX TEN-VAD → WebRTC
-
 ---
 
 A command-line tool for language-agnostic automatic synchronization of subtitles with video, so that
@@ -178,38 +176,8 @@ sudo dnf install ffmpeg
 
 The recommended way to install ffsubsync is with [uv](https://docs.astral.sh/uv/getting-started/installation/). `uv tool install` puts the package in an isolated environment and makes the CLI commands globally available.
 
-**ARM64/aarch64 (ONNX backend — all platforms):**
-
-~~~
-uv tool install "ffsubsync[tenvad-onnx] @ git+https://github.com/tinof/ffsubsync@LATEST"
-~~~
-
-**Linux x64 / macOS (native TEN VAD — best performance):**
-
-~~~
-uv tool install "ffsubsync[tenvad] @ git+https://github.com/tinof/ffsubsync@LATEST"
-~~~
-
-**WebRTC only (no TEN VAD):**
-
 ~~~
 uv tool install "git+https://github.com/tinof/ffsubsync.git"
-~~~
-
-**Development head (master branch):**
-
-~~~
-uv tool install "ffsubsync[tenvad-onnx] @ git+https://github.com/tinof/ffsubsync@master"
-~~~
-
-If you already installed without the extra, install again with the TEN VAD package added:
-
-~~~
-# ARM64:
-uv tool install --force --with onnxruntime "git+https://github.com/tinof/ffsubsync.git"
-
-# Linux x64 / macOS:
-uv tool install --force --with "ten-vad @ git+https://github.com/TEN-framework/ten-vad.git" "git+https://github.com/tinof/ffsubsync.git"
 ~~~
 
 To update later, run `uv tool upgrade ffsubsync`. To remove it, run `uv tool uninstall ffsubsync`.
@@ -220,24 +188,10 @@ To update later, run `uv tool upgrade ffsubsync`. To remove it, run `uv tool uni
 git clone https://github.com/tinof/ffsubsync.git
 cd ffsubsync
 
-# ARM64 systems
-uv tool install ".[tenvad-onnx]"
-
-# Linux x64 / macOS
-uv tool install ".[tenvad]"
-
-# WebRTC only
 uv tool install .
 ~~~
 
 `pip install` and `pipx install` accept the same package specifiers if you do not use uv.
-
-> **Note on TEN VAD wheels**: on Debian/Ubuntu you may need `sudo apt install libc++1`. If `ten-vad` fails to build on your platform, install without the extra (defaults to WebRTC VAD) or use the ONNX backend instead.
-
-**VAD Backend Priority (selected automatically):**
-1. `ten-vad` installed → native TEN VAD (best performance, Linux x64/macOS)
-2. `onnxruntime` installed → ONNX TEN VAD (ARM64 compatible)
-3. Otherwise → WebRTC VAD (always available)
 
 Usage
 -----
@@ -310,7 +264,6 @@ If the sync fails, the following recourses are available:
 - Try `--no-fix-framerate` to assume identical video / subtitle framerates
 - Try `--gss` to use [golden-section search](https://en.wikipedia.org/wiki/Golden-section_search) for the optimal framerate ratio (by default, only common ratios are evaluated)
 - Try a larger `--max-offset-seconds` (default: 60) if the subtitles are very far out of sync
-- Try `--vad=tenvad` for higher-accuracy speech detection (requires the `tenvad` or `tenvad-onnx` extra)
 
 For progressive mid-file drift that survives the above flags, use the **Piecewise Sync** tool described in the [What This Fork Adds](#what-this-fork-adds) section above.
 
@@ -328,20 +281,19 @@ the video. The most expensive step is raw audio extraction. If you already have
 a correctly synchronized reference srt file (so audio extraction can be skipped),
 ffsubsync typically runs in under a second.
 
-With `--preflight`, already-synced files are detected in a few seconds without
-running the full pipeline.
+With `--preflight`, already-synced files are detected in about a second without
+extracting the full audio.
 
-VAD Benchmarks
---------------
+Benchmarks
+----------
 Performance comparison of different synchronization methods:
 
 | Method | Time | Score | Avg Error |
 |--------|------|-------|-----------|
 | sub-to-sub | 1.8s | 81,040 | 0.23s |
 | audio-webrtc | 30.8s | 62,669 | 0.11s |
-| audio-tenvad | 30.5s | 62,669 | 0.11s |
 
-WebRTC and TEN-VAD have identical accuracy. Sub-to-sub (using a reference subtitle
+Sub-to-sub (using a reference subtitle
 file) is fastest but slightly less accurate than audio-based synchronization.
 
 How It Works
@@ -351,9 +303,7 @@ The synchronization algorithm operates in 3 steps:
    windows.
 2. For each 10ms window, determine whether that window contains speech. This is
    trivial for subtitles (any subtitle "on" during the window counts). For
-   audio, the default VAD is WebRTC; pass `--vad=tenvad` or
-   `--vad=subs_then_tenvad` to use TEN VAD instead (requires the `tenvad` or
-   `tenvad-onnx` extra).
+   audio, WebRTC VAD decides.
 3. Align the resulting binary strings using FFT-based convolution (O(n log n))
    to find the offset that maximises matched speech frames.
 
@@ -382,7 +332,6 @@ Credits
 This project would not be possible without the following libraries:
 - [ffmpeg](https://www.ffmpeg.org/) and the [ffmpeg-python](https://github.com/kkroening/ffmpeg-python) wrapper, for extracting raw audio from video
 - VAD from [webrtc](https://webrtc.org/) and the [py-webrtcvad](https://github.com/wiseman/py-webrtcvad) wrapper, for speech detection
-- [TEN VAD](https://github.com/TEN-framework/ten-vad) for high-accuracy, low-latency voice activity detection
 - [srt](https://pypi.org/project/srt/) for operating on [SRT files](https://en.wikipedia.org/wiki/SubRip#SubRip_text_file_format)
 - [numpy](http://www.numpy.org/) and, indirectly, [FFTPACK](https://www.netlib.org/fftpack/), which powers the FFT-based algorithm for fast scoring of alignments between subtitles (or subtitles and video)
 - Other excellent Python libraries like [argparse](https://docs.python.org/3/library/argparse.html), [rich](https://github.com/willmcgugan/rich), and [tqdm](https://tqdm.github.io/), not related to the core functionality, but which enable much better experiences for developers and users.
